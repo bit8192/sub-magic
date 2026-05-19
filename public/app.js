@@ -554,6 +554,10 @@ async function showRuleForm(index) {
   const proxy = parts[2] || ''
   const noResolve = raw.includes('no-resolve')
 
+  const allGroups = await API.get('/api/config/proxy-groups')
+  const proxyOptions = ['DIRECT', ...allGroups.map(g => g.name)]
+  if (proxy && !proxyOptions.includes(proxy)) proxyOptions.unshift(proxy)
+
   showModal(`
     <h3>${index !== undefined && index >= 0 ? '编辑' : '添加'}规则</h3>
     <div class="form-group">
@@ -569,7 +573,7 @@ async function showRuleForm(index) {
         <button id="geosite-btn" class="btn-sm btn-warning" onclick="openGeositePicker()" style="display:${type==='GEOSITE'?'block':'none'}">GeoSite</button>
       </div>
     </div>
-    <div class="form-group"><label>代理组</label><input id="rf-proxy" value="${esc(proxy)}" /></div>
+    <div class="form-group"><label>代理组</label><select id="rf-proxy">${proxyOptions.map(o => `<option value="${esc(o)}" ${proxy===o?'selected':''}>${esc(o)}</option>`).join('')}</select></div>
     <div class="form-group">
     	<div style="display: flex; align-items: center">
     		<label for="rf-noresolve" style="white-space: nowrap">no-resolve</label>

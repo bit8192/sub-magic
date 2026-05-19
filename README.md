@@ -48,7 +48,7 @@ npm install
    npx wrangler secret put PASSWORD
    ```
 
-2. (可选) 修改 `default.conf` 作为初始配置模板
+2. (可选) 修改 `default.yaml` 作为初始配置模板
 
 3. **生成类型定义**:
    ```bash
