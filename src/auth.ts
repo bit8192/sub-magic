@@ -3,6 +3,10 @@ import { getAccessKey, setAccessKey } from './config'
 const SESSION_COOKIE = 'session'
 const SESSION_TTL = 86400 * 7
 
+function kv(env: Env): KVNamespace | null {
+  return (env as any).SUB_MAGIC ?? null
+}
+
 function timingSafeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false
   let result = 0
@@ -44,18 +48,24 @@ export function getSessionId(request: Request): string | null {
 }
 
 export async function createSession(env: Env, sessionId: string): Promise<void> {
-  await env.SUB_MAGIC.put(`session:${sessionId}`, '1', {
+  const ns = kv(env)
+  if (!ns) return
+  await ns.put(`session:${sessionId}`, '1', {
     expirationTtl: SESSION_TTL,
   })
 }
 
 export async function isValidSession(env: Env, sessionId: string): Promise<boolean> {
-  const val = await env.SUB_MAGIC.get(`session:${sessionId}`)
+  const ns = kv(env)
+  if (!ns) return false
+  const val = await ns.get(`session:${sessionId}`)
   return val !== null
 }
 
 export async function deleteSession(env: Env, sessionId: string): Promise<void> {
-  await env.SUB_MAGIC.delete(`session:${sessionId}`)
+  const ns = kv(env)
+  if (!ns) return
+  await ns.delete(`session:${sessionId}`)
 }
 
 export async function requireAuth(request: Request, env: Env): Promise<Response | null> {

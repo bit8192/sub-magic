@@ -88,9 +88,9 @@
 
 ## 6. 待完成
 
-- [ ] **创建 KV 命名空间**: `npx wrangler kv:namespace create SUB_MAGIC`
-- [ ] **配置生产密码**: `npx wrangler secret put PASSWORD`
 - [ ] **部署**: `npm run deploy`
+- [ ] **绑定 KV**: Dashboard → Worker → Settings → Variables → KV Namespace Bindings → 添加 `SUB_MAGIC`
+- [ ] **创建密码**: `npx wrangler secret put PASSWORD`
 - [ ] 验证完整流程: 部署 → 登录 → 配置 → 获取订阅 → Clash 客户端拉取
 - [ ] 前端 GeoSite 分类解析增强 (更精确的 protobuf 解析)
 - [ ] 规则拖拽排序功能

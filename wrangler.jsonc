@@ -18,12 +18,17 @@
 		"enabled": true
 	},
 	"upload_source_maps": true,
-	"kv_namespaces": [
-		{
-			"binding": "SUB_MAGIC",
-			"id": "YOUR_KV_NAMESPACE_ID"
-		}
-	],
+	/**
+	 * KV 命名空间绑定：
+	 * 生产环境无需在此配置。部署后登录 Cloudflare Dashboard →
+	 * Worker → Settings → Variables → KV Namespace Bindings
+	 * 添加变量名 SUB_MAGIC 并选择对应的 KV 命名空间即可。
+	 *
+	 * 如需本地开发调试，可参考下方取消注释：
+	 */
+	// "kv_namespaces": [
+	//   { "binding": "SUB_MAGIC", "id": "local-dev-kv" }
+	// ],
 	"vars": {
 		"PASSWORD": "admin"
 	}

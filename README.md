@@ -43,45 +43,40 @@ npm install
 
 ### 配置
 
-1. 创建 KV 命名空间:
-   ```bash
-   npx wrangler kv:namespace create SUB_MAGIC
-   ```
-
-2. 更新 `wrangler.jsonc`,添加 KV 绑定:
-   ```jsonc
-   "kv_namespaces": [
-     {
-       "binding": "SUB_MAGIC",
-       "id": "<your-kv-namespace-id>"
-     }
-   ]
-   ```
-
-3. 创建管理后台密码:
+1. **创建管理后台密码**:
    ```bash
    npx wrangler secret put PASSWORD
    ```
 
-4. (可选) 修改 `default.conf` 作为初始配置模板
+2. (可选) 修改 `default.conf` 作为初始配置模板
 
-5. 生成类型定义:
+3. **生成类型定义**:
    ```bash
    npm run cf-typegen
    ```
-
-### 本地开发
-
-```bash
-npm run dev
-```
-
-访问 `http://localhost:8787` 进入管理界面。
 
 ### 部署
 
 ```bash
 npm run deploy
+```
+
+部署后,登录 Cloudflare Dashboard → 选择你的 Worker → **Settings → Variables → KV Namespace Bindings**,点击 **Add binding**:
+- **Variable name**: `SUB_MAGIC`
+- **KV Namespace**: 选择一个已有的 KV 命名空间或新建一个
+
+### 本地开发
+
+如需在本地调试 KV 相关功能,取消 `wrangler.jsonc` 中 `kv_namespaces` 的注释即可:
+
+```jsonc
+"kv_namespaces": [
+  { "binding": "SUB_MAGIC", "id": "local-dev" }
+]
+```
+
+```bash
+npm run dev
 ```
 
 ## 使用说明

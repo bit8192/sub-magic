@@ -3,12 +3,20 @@ import { parseConfig, serializeConfig, type ClashConfig } from './yaml'
 const KV_CONFIG_KEY = 'config'
 const KV_ACCESS_KEY = 'access_key'
 
+function kv(env: Env): KVNamespace | null {
+  return (env as any).SUB_MAGIC ?? null
+}
+
 export async function getConfig(env: Env): Promise<string | null> {
-  return await env.SUB_MAGIC.get(KV_CONFIG_KEY)
+  const ns = kv(env)
+  if (!ns) return null
+  return await ns.get(KV_CONFIG_KEY)
 }
 
 export async function saveConfig(env: Env, yamlText: string): Promise<void> {
-  await env.SUB_MAGIC.put(KV_CONFIG_KEY, yamlText)
+  const ns = kv(env)
+  if (!ns) return
+  await ns.put(KV_CONFIG_KEY, yamlText)
 }
 
 export async function getParsedConfig(env: Env): Promise<ClashConfig> {
@@ -22,11 +30,15 @@ export async function saveParsedConfig(env: Env, config: ClashConfig): Promise<v
 }
 
 export async function getAccessKey(env: Env): Promise<string | null> {
-  return await env.SUB_MAGIC.get(KV_ACCESS_KEY)
+  const ns = kv(env)
+  if (!ns) return null
+  return await ns.get(KV_ACCESS_KEY)
 }
 
 export async function setAccessKey(env: Env, key: string): Promise<void> {
-  await env.SUB_MAGIC.put(KV_ACCESS_KEY, key)
+  const ns = kv(env)
+  if (!ns) return
+  await ns.put(KV_ACCESS_KEY, key)
 }
 
 export async function initConfigIfEmpty(env: Env): Promise<void> {
