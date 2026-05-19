@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ ! -f "wrangler.jsonc" ]; then
+  exit 0
+fi
+
+node --input-type=module -e "
+import { readFileSync } from 'node:fs';
+
+const raw = readFileSync('wrangler.jsonc', 'utf8');
+const stripped = raw
+  .replace(/\/\/.*$/gm, '')
+  .replace(/\/\*[\s\S]*?\*\//g, '');
+
+let cfg;
+try {
+  cfg = JSON.parse(stripped);
+} catch (e) {
+  console.error('Error parsing wrangler.jsonc:', e.message);
+  process.exit(1);
+}
+
+const namespaces = cfg.kv_namespaces;
+if (Array.isArray(namespaces) && namespaces.some((ns) => ns.id?.trim?.()?.length > 0)) {
+  console.error('Error: wrangler.jsonc has kv_namespaces with a non-empty id.');
+  console.error('Remove the id value before committing. See the comments in wrangler.jsonc for details.');
+  process.exit(1);
+}
+"

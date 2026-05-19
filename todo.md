@@ -88,11 +88,11 @@
 
 ## 6. 待完成
 
-- [ ] **部署**: `npm run deploy`
-- [ ] **绑定 KV**: Dashboard → Worker → Settings → Variables → KV Namespace Bindings → 添加 `SUB_MAGIC`
-- [ ] **创建密码**: `npx wrangler secret put PASSWORD`
-- [ ] 验证完整流程: 部署 → 登录 → 配置 → 获取订阅 → Clash 客户端拉取
-- [ ] 前端 GeoSite 分类解析增强 (更精确的 protobuf 解析)
-- [ ] 规则拖拽排序功能
-- [ ] 代理组 proxies 拖拽排序
-- [ ] 配置历史版本管理
+- [x] **部署**: `npm run deploy`
+- [x] **绑定 KV**: Dashboard → Worker → Settings → Variables → KV Namespace Bindings → 添加 `SUB_MAGIC`
+- [x] **创建密码**: `npx wrangler secret put PASSWORD`
+- [x] 验证完整流程: 部署 → 登录 → 配置 → 获取订阅 → Clash 客户端拉取
+- [x] 前端 GeoSite 分类解析增强 (更精确的 protobuf 解析)
+- [x] 规则拖拽排序功能 (HTML5 Drag & Drop, PUT /api/config/rules 持久化)
+- [x] 代理组 proxies 拖拽排序 (按组内拖拽排序, PUT /api/config/proxy-groups/{name} 持久化)
+- [x] 配置历史版本管理 (KV 存储, 列表/查看/恢复/删除, 前端 `save version` + 版本管理界面)

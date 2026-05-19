@@ -1,5 +1,7 @@
 import {
   getConfig, saveConfig, getParsedConfig, getAccessKey,
+  getConfigVersions, getConfigVersion, saveConfigVersion,
+  restoreConfigVersion, deleteConfigVersion,
 } from './config'
 import {
   parseConfig, serializeConfig, parseRule, type ProxyGroup, type ProxyProvider,
@@ -240,6 +242,46 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     return json({ ok: true })
   }
 
+  // --- Config Version History ---
+  if (path === '/api/config/versions') {
+    if (method === 'GET') {
+      const list = await getConfigVersions(env)
+      return json(list)
+    }
+    if (method === 'POST') {
+      const body = await parseBody(request)
+      const label = String(body.label || '').trim() || undefined
+      try {
+        const version = await saveConfigVersion(env, label)
+        return json(version)
+      } catch {
+        return json({ error: 'Failed to save version' }, 400)
+      }
+    }
+  }
+
+  if (path.startsWith('/api/config/versions/') && method === 'GET') {
+    const id = decodeURIComponent(path.slice('/api/config/versions/'.length))
+    const config = await getConfigVersion(env, id)
+    if (!config) return json({ error: 'Version not found' }, 404)
+    return json({ config })
+  }
+
+  if (path.startsWith('/api/config/versions/') && method === 'POST') {
+    const id = decodeURIComponent(path.slice('/api/config/versions/'.length))
+    if (path.endsWith('/restore')) {
+      const ok = await restoreConfigVersion(env, id)
+      if (!ok) return json({ error: 'Version not found' }, 404)
+      return json({ ok: true })
+    }
+  }
+
+  if (path.startsWith('/api/config/versions/') && method === 'DELETE') {
+    const id = decodeURIComponent(path.slice('/api/config/versions/'.length))
+    await deleteConfigVersion(env, id)
+    return json({ ok: true })
+  }
+
   // --- Access Key ---
   if (path === '/api/access-key') {
     if (method === 'GET') {
@@ -250,23 +292,6 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     if (method === 'POST') {
       const newKey = await generateAccessKey(env)
       return json({ key: newKey })
-    }
-  }
-
-  // --- GeoSite parse proxy ---
-  if (path === '/api/geosite/parse' && method === 'POST') {
-    const config = await getParsedConfig(env)
-    const geox = (config as any)['geox-url']
-    const geoxUrl = geox?.geosite
-    if (!geoxUrl) return json({ error: 'geox-url.geosite not configured' }, 400)
-    try {
-      const resp = await fetch(geoxUrl)
-      if (!resp.ok) return json({ error: 'Failed to fetch geosite.dat' }, 502)
-      const buffer = await resp.arrayBuffer()
-      const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)))
-      return json({ data: base64, filename: 'geosite.dat' })
-    } catch {
-      return json({ error: 'Failed to fetch geosite data' }, 502)
     }
   }
 

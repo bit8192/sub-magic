@@ -8,8 +8,7 @@
 	"main": "src/index.ts",
 	"compatibility_date": "2026-05-19",
 	"compatibility_flags": [
-		"nodejs_compat",
-		"global_fetch_strictly_public"
+		"nodejs_compat"
 	],
 	"assets": {
 		"directory": "./public"
@@ -27,7 +26,7 @@
 	 * 如需本地开发调试，可参考下方取消注释：
 	 */
 	// "kv_namespaces": [
-	//   { "binding": "SUB_MAGIC", "id": "local-dev-kv" }
+	//   { "binding": "SUB_MAGIC", "id": "" }
 	// ],
 	"vars": {
 		"PASSWORD": "admin"

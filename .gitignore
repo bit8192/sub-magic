@@ -158,6 +158,10 @@ dist
 .yarn/install-state.gz
 .pnp.\*
 
+# Local geosite cache
+public/geosite.dat
+public/GeoSite.dat
+
 # wrangler project
 
 .dev.vars*

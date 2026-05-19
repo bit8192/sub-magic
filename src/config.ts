@@ -41,6 +41,68 @@ export async function setAccessKey(env: Env, key: string): Promise<void> {
   await ns.put(KV_ACCESS_KEY, key)
 }
 
+const VERSIONS_INDEX_KEY = 'versions:index'
+
+export interface ConfigVersion {
+  id: string
+  timestamp: number
+  label: string
+}
+
+export async function saveConfigVersion(env: Env, label?: string): Promise<ConfigVersion> {
+  const ns = kv(env)
+  if (!ns) throw new Error('KV not bound')
+  const config = await getConfig(env)
+  if (!config) throw new Error('No config to save')
+  const id = Date.now().toString(36) + '-' + crypto.randomUUID().slice(0, 8)
+  const version: ConfigVersion = {
+    id,
+    timestamp: Date.now(),
+    label: label || `v${id.slice(0, 8)}`,
+  }
+  await ns.put(`version:${id}`, config)
+  const indexRaw = await ns.get(VERSIONS_INDEX_KEY)
+  const index: ConfigVersion[] = indexRaw ? JSON.parse(indexRaw) : []
+  index.unshift(version)
+  await ns.put(VERSIONS_INDEX_KEY, JSON.stringify(index))
+  return version
+}
+
+export async function getConfigVersions(env: Env): Promise<ConfigVersion[]> {
+  const ns = kv(env)
+  if (!ns) return []
+  const raw = await ns.get(VERSIONS_INDEX_KEY)
+  return raw ? JSON.parse(raw) : []
+}
+
+export async function getConfigVersion(env: Env, id: string): Promise<string | null> {
+  const ns = kv(env)
+  if (!ns) return null
+  return await ns.get(`version:${id}`)
+}
+
+export async function restoreConfigVersion(env: Env, id: string): Promise<boolean> {
+  const ns = kv(env)
+  if (!ns) return false
+  const config = await ns.get(`version:${id}`)
+  if (!config) return false
+  await ns.put('config', config)
+  return true
+}
+
+export async function deleteConfigVersion(env: Env, id: string): Promise<boolean> {
+  const ns = kv(env)
+  if (!ns) return false
+  await ns.delete(`version:${id}`)
+  const indexRaw = await ns.get(VERSIONS_INDEX_KEY)
+  if (indexRaw) {
+    const index: ConfigVersion[] = JSON.parse(indexRaw)
+    const filtered = index.filter(v => v.id !== id)
+    await ns.put(VERSIONS_INDEX_KEY, JSON.stringify(filtered))
+  }
+  return true
+}
+
 export async function initConfigIfEmpty(env: Env): Promise<void> {
   const existing = await getConfig(env)
   if (existing) return
