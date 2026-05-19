@@ -161,6 +161,8 @@ dist
 # Local geosite cache
 public/geosite.dat
 public/GeoSite.dat
+public/geoip.dat
+public/GeoIp.dat
 
 # wrangler project
 
