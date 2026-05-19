@@ -1,0 +1,274 @@
+import {
+  getConfig, saveConfig, getParsedConfig, getAccessKey,
+} from './config'
+import {
+  parseConfig, serializeConfig, parseRule, type ProxyGroup, type ProxyProvider,
+} from './yaml'
+import {
+  verifyPassword, verifyAccessKey, generateSessionId, createSessionCookie, clearSessionCookie,
+  createSession, deleteSession, requireAuth, generateAccessKey,
+} from './auth'
+import { generateSubscription } from './subscribe'
+
+function json(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+function parseBody(request: Request): Promise<Record<string, unknown>> {
+  return request.json().catch(() => ({})) as Promise<Record<string, unknown>>
+}
+
+export async function handleRequest(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url)
+  const path = url.pathname
+  const method = request.method
+
+  // Subscription endpoint (no auth required)
+  if (method === 'GET' && path.startsWith('/sub/')) {
+    const key = path.slice(5)
+    if (key.length < 8) return json({ error: 'Invalid key' }, 400)
+    const valid = await verifyAccessKey(env, key)
+    if (!valid) return json({ error: 'Forbidden' }, 403)
+    return generateSubscription(env, request)
+  }
+
+  // Auth endpoints
+  if (path === '/api/login') {
+    if (method === 'POST') {
+      const body = await parseBody(request)
+      const password = String(body.password || '')
+      const ok = await verifyPassword(env, password)
+      if (!ok) return json({ error: 'Invalid password' }, 401)
+      const sessionId = generateSessionId()
+      await createSession(env, sessionId)
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { 'Content-Type': 'application/json', 'Set-Cookie': createSessionCookie(sessionId) },
+      })
+    }
+    return json({ error: 'Method not allowed' }, 405)
+  }
+
+  if (path === '/api/logout') {
+    if (method === 'POST') {
+      const sessionId = request.headers.get('Cookie')?.match(/session=([^;]+)/)?.[1]
+      if (sessionId) await deleteSession(env, sessionId)
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { 'Content-Type': 'application/json', 'Set-Cookie': clearSessionCookie() },
+      })
+    }
+    return json({ error: 'Method not allowed' }, 405)
+  }
+
+  if (path === '/api/check') {
+    const authErr = await requireAuth(request, env)
+    if (authErr) return authErr
+    return json({ ok: true })
+  }
+
+  // All other API routes require auth
+  const authErr = await requireAuth(request, env)
+  if (authErr) return authErr
+
+  // --- Config full text ---
+  if (path === '/api/config' && method === 'GET') {
+    const raw = await getConfig(env)
+    return json({ config: raw || '' })
+  }
+
+  if (path === '/api/config' && method === 'PUT') {
+    const body = await parseBody(request)
+    const yamlText = String(body.config || '')
+    try {
+      parseConfig(yamlText)
+    } catch {
+      return json({ error: 'Invalid YAML' }, 400)
+    }
+    await saveConfig(env, yamlText)
+    return json({ ok: true })
+  }
+
+  // --- Proxy Providers ---
+  if (path === '/api/config/proxy-providers') {
+    const config = await getParsedConfig(env)
+    const providers = config['proxy-providers'] || {}
+
+    if (method === 'GET') {
+      const list = Object.entries(providers).map(([n, p]) => ({ name: n, ...p }))
+      return json(list)
+    }
+
+    if (method === 'POST') {
+      const body = await parseBody(request)
+      const providerName = String(body.name || '').trim()
+      if (!providerName) return json({ error: 'Name is required' }, 400)
+      if (providers[providerName]) return json({ error: 'Provider already exists' }, 409)
+      const { name: _n, ...providerData } = body
+      providers[providerName] = providerData as ProxyProvider
+      config['proxy-providers'] = providers
+      await saveConfig(env, serializeConfig(config))
+      return json({ ok: true })
+    }
+  }
+
+  if (path.startsWith('/api/config/proxy-providers/') && method === 'PUT') {
+    const name = decodeURIComponent(path.slice('/api/config/proxy-providers/'.length))
+    const config = await getParsedConfig(env)
+    const providers = config['proxy-providers'] || {}
+    if (!providers[name]) return json({ error: 'Not found' }, 404)
+    const body = await parseBody(request)
+    const { name: _n, ...providerData } = body
+    providers[name] = providerData as ProxyProvider
+    config['proxy-providers'] = providers
+    await saveConfig(env, serializeConfig(config))
+    return json({ ok: true })
+  }
+
+  if (path.startsWith('/api/config/proxy-providers/') && method === 'DELETE') {
+    const name = decodeURIComponent(path.slice('/api/config/proxy-providers/'.length))
+    const config = await getParsedConfig(env)
+    const providers = config['proxy-providers'] || {}
+    if (!providers[name]) return json({ error: 'Not found' }, 404)
+    delete providers[name]
+    config['proxy-providers'] = providers
+    await saveConfig(env, serializeConfig(config))
+    return json({ ok: true })
+  }
+
+  // --- Proxy Groups ---
+  if (path === '/api/config/proxy-groups') {
+    const config = await getParsedConfig(env)
+    const groups = config['proxy-groups'] || []
+
+    if (method === 'GET') {
+      return json(groups)
+    }
+
+    if (method === 'POST') {
+      const body = (await parseBody(request)) as unknown as ProxyGroup
+      const name = String(body.name || '').trim()
+      if (!name) return json({ error: 'Name is required' }, 400)
+      if (groups.some(g => g.name === name)) return json({ error: 'Group already exists' }, 409)
+      groups.push(body)
+      config['proxy-groups'] = groups
+      await saveConfig(env, serializeConfig(config))
+      return json({ ok: true })
+    }
+  }
+
+  if (path.startsWith('/api/config/proxy-groups/') && method === 'PUT') {
+    const name = decodeURIComponent(path.slice('/api/config/proxy-groups/'.length))
+    const config = await getParsedConfig(env)
+    const groups = config['proxy-groups'] || []
+    const idx = groups.findIndex(g => g.name === name)
+    if (idx === -1) return json({ error: 'Not found' }, 404)
+    const body = (await parseBody(request)) as unknown as ProxyGroup
+    groups[idx] = body
+    config['proxy-groups'] = groups
+    await saveConfig(env, serializeConfig(config))
+    return json({ ok: true })
+  }
+
+  if (path.startsWith('/api/config/proxy-groups/') && method === 'DELETE') {
+    const name = decodeURIComponent(path.slice('/api/config/proxy-groups/'.length))
+    const config = await getParsedConfig(env)
+    const groups = config['proxy-groups'] || []
+    const idx = groups.findIndex(g => g.name === name)
+    if (idx === -1) return json({ error: 'Not found' }, 404)
+    groups.splice(idx, 1)
+    config['proxy-groups'] = groups
+    await saveConfig(env, serializeConfig(config))
+    return json({ ok: true })
+  }
+
+  // --- Rules ---
+  if (path === '/api/config/rules') {
+    const config = await getParsedConfig(env)
+    const rules = config.rules || []
+
+    if (method === 'GET') {
+      const parsed = rules.map((r, i) => ({ index: i, raw: r, ...parseRule(r) }))
+      return json(parsed)
+    }
+
+    if (method === 'POST') {
+      const body = await parseBody(request)
+      const raw = String(body.raw || '')
+      if (!raw) return json({ error: 'Rule is required' }, 400)
+      rules.push(raw)
+      config.rules = rules
+      await saveConfig(env, serializeConfig(config))
+      return json({ ok: true })
+    }
+
+    if (method === 'PUT') {
+      const body = await parseBody(request)
+      const reorder = body.rules as string[]
+      if (!Array.isArray(reorder)) return json({ error: 'rules array required' }, 400)
+      config.rules = reorder
+      await saveConfig(env, serializeConfig(config))
+      return json({ ok: true })
+    }
+  }
+
+  if (path.startsWith('/api/config/rules/') && method === 'PUT') {
+    const idxStr = path.slice('/api/config/rules/'.length)
+    const idx = parseInt(idxStr, 10)
+    const config = await getParsedConfig(env)
+    const rules = config.rules || []
+    if (idx < 0 || idx >= rules.length) return json({ error: 'Index out of range' }, 404)
+    const body = await parseBody(request)
+    const raw = String(body.raw || '')
+    if (!raw) return json({ error: 'Rule is required' }, 400)
+    rules[idx] = raw
+    config.rules = rules
+    await saveConfig(env, serializeConfig(config))
+    return json({ ok: true })
+  }
+
+  if (path.startsWith('/api/config/rules/') && method === 'DELETE') {
+    const idxStr = path.slice('/api/config/rules/'.length)
+    const idx = parseInt(idxStr, 10)
+    const config = await getParsedConfig(env)
+    const rules = config.rules || []
+    if (idx < 0 || idx >= rules.length) return json({ error: 'Index out of range' }, 404)
+    rules.splice(idx, 1)
+    config.rules = rules
+    await saveConfig(env, serializeConfig(config))
+    return json({ ok: true })
+  }
+
+  // --- Access Key ---
+  if (path === '/api/access-key') {
+    if (method === 'GET') {
+      const key = await getAccessKey(env)
+      return json({ key })
+    }
+
+    if (method === 'POST') {
+      const newKey = await generateAccessKey(env)
+      return json({ key: newKey })
+    }
+  }
+
+  // --- GeoSite parse proxy ---
+  if (path === '/api/geosite/parse' && method === 'POST') {
+    const config = await getParsedConfig(env)
+    const geox = (config as any)['geox-url']
+    const geoxUrl = geox?.geosite
+    if (!geoxUrl) return json({ error: 'geox-url.geosite not configured' }, 400)
+    try {
+      const resp = await fetch(geoxUrl)
+      if (!resp.ok) return json({ error: 'Failed to fetch geosite.dat' }, 502)
+      const buffer = await resp.arrayBuffer()
+      const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)))
+      return json({ data: base64, filename: 'geosite.dat' })
+    } catch {
+      return json({ error: 'Failed to fetch geosite data' }, 502)
+    }
+  }
+
+  return json({ error: 'Not found' }, 404)
+}
