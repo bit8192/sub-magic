@@ -163,6 +163,7 @@ public/geosite.dat
 public/GeoSite.dat
 public/geoip.dat
 public/GeoIp.dat
+public/GeoIP.dat
 
 # wrangler project
 
@@ -171,3 +172,6 @@ public/GeoIp.dat
 .env*
 !.env.example
 .wrangler/
+
+# Generated extension packages
+public/extensions/

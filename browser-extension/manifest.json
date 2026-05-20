@@ -1,0 +1,30 @@
+{
+	"manifest_version": 3,
+	"name": "Sub Magic - Mihomo Rule Manager",
+	"version": "1.0.0",
+	"description": "查询当前站点的路由链路并快速添加 mihomo 规则",
+	"browser_specific_settings": {
+		"gecko": {
+			"id": "sub-magic@example.com",
+			"strict_min_version": "109.0"
+		}
+	},
+	"permissions": ["storage", "activeTab", "tabs"],
+	"host_permissions": ["<all_urls>"],
+	"action": {
+		"default_title": "Sub Magic",
+		"default_popup": "src/popup/popup.html",
+		"default_icon": {
+			"16": "icons/icon-16.png",
+			"48": "icons/icon-48.png",
+			"128": "icons/icon-128.png"
+		}
+	},
+	"options_ui": {
+		"page": "src/options/options.html",
+		"open_in_tab": false
+	},
+	"background": {
+		"scripts": ["src/background/background.js"]
+	}
+}

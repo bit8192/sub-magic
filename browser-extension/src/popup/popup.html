@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>Sub Magic</title>
+	<link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+	<div class="header">
+		<h1>Sub Magic</h1>
+	</div>
+
+	<div class="section">
+		<div class="section-title">当前站点</div>
+		<div id="current-domain" class="domain-badge">加载中...</div>
+	</div>
+
+	<div class="section" id="routing-section" style="display:none">
+		<div class="section-title">路由查询</div>
+		<button id="btn-query-routing" class="btn btn-primary">查询路由链路</button>
+		<div id="routing-result" class="result-box"></div>
+	</div>
+
+	<div class="section" id="rule-section" style="display:none">
+		<div class="section-title">添加规则</div>
+		<div class="form-group">
+			<label>规则类型</label>
+			<select id="rule-type">
+				<option value="DOMAIN-SUFFIX">DOMAIN-SUFFIX</option>
+				<option value="DOMAIN">DOMAIN</option>
+				<option value="DOMAIN-KEYWORD">DOMAIN-KEYWORD</option>
+				<option value="GEOSITE">GEOSITE</option>
+				<option value="GEOIP">GEOIP</option>
+				<option value="IP-CIDR">IP-CIDR</option>
+				<option value="SRC-IP-CIDR">SRC-IP-CIDR</option>
+				<option value="MATCH">MATCH</option>
+			</select>
+		</div>
+		<div class="form-group" id="payload-group">
+			<label>匹配值</label>
+			<input type="text" id="rule-payload" placeholder="example.com" />
+		</div>
+		<div class="form-group">
+			<label>代理组/策略</label>
+			<input type="text" id="rule-proxy" placeholder="Proxy" />
+		</div>
+		<div class="form-actions">
+			<button id="btn-add-rule-local" class="btn btn-primary">添加到本地</button>
+			<button id="btn-add-rule-remote" class="btn btn-secondary">添加到远程</button>
+			<button id="btn-add-rule-both" class="btn btn-accent">同时添加</button>
+		</div>
+		<div id="rule-result" class="result-box"></div>
+	</div>
+
+	<div class="footer">
+		<button id="btn-settings" class="btn-link">设置</button>
+		<span class="status" id="status-text">未配置</span>
+	</div>
+
+	<script src="popup.js" type="module"></script>
+</body>
+</html>

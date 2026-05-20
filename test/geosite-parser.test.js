@@ -11,11 +11,13 @@ import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 
-// Load parser functions from app.js
-const appJs = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8')
-const start = appJs.indexOf('function parseGeositeDat')
-const end = appJs.indexOf('/* ============ Text Editor ============ */')
+// Load parser functions from js/parsers/geosite.js
+const appJs = readFileSync(new URL('../public/js/parsers/geosite.js', import.meta.url), 'utf8')
+const start = appJs.indexOf('export function parseGeositeDat')
+const end = appJs.length
 const fnCode = appJs.slice(start, end)
+  .replace(/export function /g, 'function ')
+  .replace(/export const /g, 'const ')
 
 const geositeDat = new Uint8Array(readFileSync(new URL('../public/GeoSite.dat', import.meta.url)))
 

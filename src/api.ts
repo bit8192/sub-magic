@@ -11,6 +11,7 @@ import {
   createSession, deleteSession, requireAuth, generateAccessKey,
 } from './auth'
 import { generateSubscription } from './subscribe'
+import { getSubscriptionInfo } from './subscription-info'
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -78,6 +79,15 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
   if (path === '/api/config' && method === 'GET') {
     const raw = await getConfig(env)
     return json({ config: raw || '' })
+  }
+
+  if (path === '/api/config/meta' && method === 'GET') {
+    const parsed = await getParsedConfig(env)
+    const meta: Record<string, unknown> = {}
+    if (parsed['external-controller']) meta['external-controller'] = parsed['external-controller']
+    if (parsed['external-ui']) meta['external-ui'] = parsed['external-ui']
+    if (parsed['external-ui-url']) meta['external-ui-url'] = parsed['external-ui-url']
+    return json(meta)
   }
 
   if (path === '/api/config' && method === 'PUT') {
@@ -293,6 +303,41 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       const newKey = await generateAccessKey(env)
       return json({ key: newKey })
     }
+  }
+
+  // --- Subscription Info ---
+  if (path === '/api/subscription-info' && method === 'POST') {
+    const body = await parseBody(request)
+    const name = String(body.name || '').trim()
+    if (!name) return json({ error: 'Provider name is required' }, 400)
+    const result = await getSubscriptionInfo(env, name)
+    if ('error' in result) return json({ error: result.error }, 400)
+    return json(result)
+  }
+
+  // --- Add rule by access key (for browser extension) ---
+  if (path === '/api/rules/add-by-key' && method === 'POST') {
+    const body = await parseBody(request)
+    const key = String(body.key || '')
+    const rule = String(body.rule || '')
+    if (!key || !rule) return json({ error: 'key and rule are required' }, 400)
+    const valid = await verifyAccessKey(env, key)
+    if (!valid) return json({ error: 'Forbidden' }, 403)
+
+    const config = await getParsedConfig(env)
+    const rules = config.rules || []
+
+    const matchIdx = rules.findIndex(r => r.trim().toUpperCase().startsWith('MATCH'))
+
+    if (matchIdx !== -1) {
+      rules.splice(matchIdx, 0, rule)
+    } else {
+      rules.push(rule)
+    }
+
+    config.rules = rules
+    await saveConfig(env, serializeConfig(config))
+    return json({ ok: true, ruleCount: rules.length })
   }
 
   return json({ error: 'Not found' }, 404)

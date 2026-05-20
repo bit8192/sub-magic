@@ -37,7 +37,7 @@ function toast(msg, type = 'info') {
   setTimeout(() => el.remove(), 3000)
 }
 
-let currentView = 'dashboard'
+let currentView = 'index'
 
 function renderLogin() {
   currentView = 'login'
@@ -85,13 +85,13 @@ async function doLogout() {
 }
 
 function renderApp() {
-  currentView = 'dashboard'
+  currentView = 'index'
   const app = document.getElementById('app')
   app.innerHTML = `
     <div class="topbar">
       <h1>Sub Magic</h1>
       <nav>
-        <button class="active" data-view="dashboard" onclick="switchView('dashboard')">仪表盘</button>
+        <button class="active" data-view="index" onclick="switchView('index')">首页</button>
         <button data-view="providers" onclick="switchView('providers')">订阅源</button>
         <button data-view="groups" onclick="switchView('groups')">代理组</button>
         <button data-view="rules" onclick="switchView('rules')">规则</button>
@@ -101,7 +101,7 @@ function renderApp() {
       <button class="btn-logout" onclick="doLogout()">登出</button>
     </div>
     <div id="view-container"></div>`
-  switchView('dashboard')
+  switchView('index')
 }
 
 function switchView(view) {
@@ -111,7 +111,7 @@ function switchView(view) {
   })
   const container = document.getElementById('view-container')
   switch (view) {
-    case 'dashboard': renderDashboard(container); break
+    case 'index': renderDashboard(container); break
     case 'providers': renderProviders(container); break
     case 'groups': renderGroups(container); break
     case 'rules': renderRules(container); break
@@ -120,7 +120,7 @@ function switchView(view) {
   }
 }
 
-/* ============ Dashboard ============ */
+/* ============ Index ============ */
 async function renderDashboard(container) {
   const keyRes = await API.get('/api/access-key')
   const configRes = await API.get('/api/config')
@@ -350,10 +350,10 @@ async function showGroupForm(name) {
       </div>
     </div>
     <div class="form-group">
-    	<div style="display: flex; align-items: center;">
-    		<label for="gf-include-all" style="white-space: nowrap">include-all</label>
+    	<label for="gf-include-all" style="white-space: nowrap">
+    		include-all
     		<input type="checkbox" id="gf-include-all" ${group['include-all']?'checked':''} />
-			</div>
+    	</label>
     </div>
     <div class="form-group"><label>Filter (正则)</label><input id="gf-filter" value="${esc(group.filter || '')}" /></div>
     <div id="gf-extra">
@@ -576,10 +576,10 @@ async function showRuleForm(index) {
     </div>
     <div class="form-group"><label>代理组</label><select id="rf-proxy">${proxyOptions.map(o => `<option value="${esc(o)}" ${proxy===o?'selected':''}>${esc(o)}</option>`).join('')}</select></div>
     <div class="form-group">
-    	<div style="display: flex; align-items: center">
-    		<label for="rf-noresolve" style="white-space: nowrap">no-resolve</label>
-    		<input type="checkbox" id="rf-noresolve" ${noResolve?'checked':''} />
-			</div>
+        <label for="rf-noresolve" style="white-space: nowrap">
+            no-resolve
+            <input type="checkbox" id="rf-noresolve" ${noResolve?'checked':''} />
+        </label>
     </div>
     <div class="form-actions">
       <button class="btn-primary" onclick="saveRule(${index !== undefined && index >= 0 ? index : 'undefined'})">保存</button>

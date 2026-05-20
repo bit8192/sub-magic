@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>Sub Magic 设置</title>
+	<link rel="stylesheet" href="options.css" />
+</head>
+<body>
+	<div class="header">
+		<h1>Sub Magic 设置</h1>
+	</div>
+
+	<div class="section">
+		<h2>Mihomo API</h2>
+		<p class="desc">本地 mihomo 内核的 API 控制器地址和密钥</p>
+		<div class="form-group">
+			<label>控制器地址</label>
+			<input type="text" id="mihomo-url" placeholder="127.0.0.1:9090" />
+		</div>
+		<div class="form-group">
+			<label>API 密钥 (secret)</label>
+			<input type="password" id="mihomo-secret" placeholder="在配置文件的 secret 字段设置" />
+		</div>
+	</div>
+
+	<div class="section">
+		<h2>Sub Magic 远程接口</h2>
+		<p class="desc">Sub Magic 的 Worker 地址和订阅访问 Key</p>
+		<div class="form-group">
+			<label>Sub Magic 地址</label>
+			<input type="text" id="submagic-url" placeholder="https://your-worker.workers.dev" />
+		</div>
+		<div class="form-group">
+			<label>访问 Key</label>
+			<input type="password" id="submagic-key" placeholder="在仪表盘中可查看订阅 Key" />
+		</div>
+	</div>
+
+	<div class="actions">
+		<button id="btn-save" class="btn btn-primary">保存</button>
+		<span id="save-status"></span>
+	</div>
+
+	<script src="options.js" type="module"></script>
+</body>
+</html>
