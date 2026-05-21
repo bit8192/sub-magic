@@ -1,10 +1,11 @@
 {
 	"name": "sub-magic-extension",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"private": true,
 	"description": "Browser extension for Sub Magic - Mihomo rule management",
 	"scripts": {
-		"build": "node scripts/build.js"
+		"build": "node scripts/build.js",
+		"sign:firefox": "source ./.env && npx web-ext sign --source-dir=./ --api-key=\"$FIREFOX_API_KEY\" --api-secret=\"$FIREFOX_API_SECRET\" --channel=unlisted"
 	},
 	"devDependencies": {
 		"web-ext": "^8.0.0"

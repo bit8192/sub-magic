@@ -40,6 +40,40 @@ describe("YAML utilities", () => {
     expect(serialized).toContain("Test")
   })
 
+  it("serializeConfig orders top-level and nested keys for readability", () => {
+    const serialized = serializeConfig({
+      rules: ['MATCH,Proxy'],
+      dns: {
+        nameserver: ['https://1.1.1.1/dns-query'],
+        enable: true,
+        ipv6: true,
+      },
+      profile: {
+        store-fake-ip: true,
+        store-selected: true,
+      },
+      'proxy-groups': [{ type: 'select', name: 'Proxy', interval: 300, proxies: ['DIRECT'] }],
+      mixed-port: 7890,
+      'proxy-providers': {
+        demo: {
+          interval: 86400,
+          type: 'http',
+          url: 'https://example.com/sub',
+        },
+      },
+    })
+
+    expect(serialized.indexOf('mixed-port: 7890')).toBeLessThan(serialized.indexOf('profile:'))
+    expect(serialized.indexOf('profile:')).toBeLessThan(serialized.indexOf('dns:'))
+    expect(serialized.indexOf('dns:')).toBeLessThan(serialized.indexOf('proxy-providers:'))
+    expect(serialized.indexOf('proxy-providers:')).toBeLessThan(serialized.indexOf('proxy-groups:'))
+    expect(serialized.indexOf('proxy-groups:')).toBeLessThan(serialized.indexOf('rules:'))
+    expect(serialized).toContain('store-selected: true\n  store-fake-ip: true')
+    expect(serialized).toContain('enable: true\n  ipv6: true\n  nameserver:')
+    expect(serialized).toContain('- name: Proxy\n    type: select\n    proxies:\n      - DIRECT\n    interval: 300')
+    expect(serialized).toContain('url: https://example.com/sub\n    type: http\n    interval: 86400')
+  })
+
   it("parseRule parses rule string", () => {
     const rule = parseRule("GEOIP,CN,DIRECT,no-resolve")
     expect(rule).not.toBeNull()
@@ -50,8 +84,22 @@ describe("YAML utilities", () => {
   })
 
   it("serializeRule produces correct string", () => {
-    expect(serializeRule({ type: "MATCH", payload: "", proxy: "Proxy" })).toBe("MATCH,,Proxy")
+    expect(serializeRule({ type: "MATCH", payload: "", proxy: "Proxy" })).toBe("MATCH,Proxy")
     expect(serializeRule({ type: "GEOIP", payload: "CN", proxy: "DIRECT", noResolve: true })).toBe("GEOIP,CN,DIRECT,no-resolve")
+  })
+
+  it("parseRule handles MATCH shorthand and logic payloads", () => {
+    const matchRule = parseRule("MATCH,Proxy")
+    expect(matchRule).not.toBeNull()
+    expect(matchRule!.type).toBe("MATCH")
+    expect(matchRule!.payload).toBe("")
+    expect(matchRule!.proxy).toBe("Proxy")
+
+    const logicRule = parseRule("AND,((DOMAIN,baidu.com),(NETWORK,UDP)),DIRECT")
+    expect(logicRule).not.toBeNull()
+    expect(logicRule!.type).toBe("AND")
+    expect(logicRule!.payload).toBe("((DOMAIN,baidu.com),(NETWORK,UDP))")
+    expect(logicRule!.proxy).toBe("DIRECT")
   })
 
   it("parseRule returns null for invalid rule", () => {
@@ -220,5 +268,33 @@ describe("API endpoints", () => {
     const data = await res.json()
     expect(data.key).not.toBe("testkey123")
     expect(data.key.length).toBeGreaterThan(8)
+  })
+
+  it("POST /api/rules/add-by-key adds a rule before MATCH", async () => {
+    const res = await SELF.fetch("http://example.com/api/rules/add-by-key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: "testkey123", rule: "DOMAIN-SUFFIX,example.com,Proxy" }),
+    })
+    expect(res.status).toBe(200)
+    const stored = await env.SUB_MAGIC.get("config")
+    expect(stored).toContain("DOMAIN-SUFFIX,example.com,Proxy")
+    expect(stored?.indexOf("DOMAIN-SUFFIX,example.com,Proxy")).toBeLessThan(stored?.indexOf("MATCH,Proxy") ?? 0)
+  })
+
+  it("POST /api/rules/update-by-key updates an existing rule", async () => {
+    const res = await SELF.fetch("http://example.com/api/rules/update-by-key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        key: "testkey123",
+        oldRule: "GEOIP,CN,DIRECT",
+        newRule: "GEOIP,CN,Proxy",
+      }),
+    })
+    expect(res.status).toBe(200)
+    const stored = await env.SUB_MAGIC.get("config")
+    expect(stored).toContain("GEOIP,CN,Proxy")
+    expect(stored).not.toContain("GEOIP,CN,DIRECT")
   })
 })

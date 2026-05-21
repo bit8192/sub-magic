@@ -1,10 +1,25 @@
 import { API } from '../api.js'
 import { esc, toast, showModal, closeModal } from '../utils.js'
-import { rulesData as _rulesData, setRulesData } from '../state.js'
+import { setRulesData } from '../state.js'
 import { parseGeositeDat } from '../parsers/geosite.js'
 import { parseGeoipDat, GEOIP_NAMES } from '../parsers/geoip.js'
 
-export const RULE_TYPES = ['MATCH', 'GEOIP', 'GEOSITE', 'DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD', 'DOMAIN-REGEX', 'IP-CIDR', 'SRC-IP-CIDR', 'DST-PORT', 'SRC-PORT', 'PROCESS-NAME']
+export const RULE_TYPES = [
+  'DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD', 'DOMAIN-WILDCARD', 'DOMAIN-REGEX', 'GEOSITE',
+  'IP-CIDR', 'IP-CIDR6', 'IP-SUFFIX', 'IP-ASN', 'GEOIP',
+  'SRC-GEOIP', 'SRC-IP-ASN', 'SRC-IP-CIDR', 'SRC-IP-SUFFIX',
+  'DST-PORT', 'SRC-PORT',
+  'IN-PORT', 'IN-TYPE', 'IN-USER', 'IN-NAME',
+  'PROCESS-PATH', 'PROCESS-PATH-WILDCARD', 'PROCESS-PATH-REGEX',
+  'PROCESS-NAME', 'PROCESS-NAME-WILDCARD', 'PROCESS-NAME-REGEX',
+  'UID', 'NETWORK', 'DSCP',
+  'RULE-SET', 'AND', 'OR', 'NOT', 'SUB-RULE', 'MATCH',
+]
+
+const COMMON_RULE_TARGETS = ['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'GLOBAL']
+
+let activeRuleFormIndex
+let pendingRuleDraft = null
 
 export async function renderRules(container) {
   const data = await API.get('/api/config/rules')
@@ -19,7 +34,7 @@ export async function renderRules(container) {
         <div class="rule-item" draggable="true" data-index="${i}" data-raw="${esc(r.raw)}">
           <div class="drag-handle">⠿</div>
           <div>
-            ${r.type ? `<span class="rule-tag ${r.type.toLowerCase()}">${esc(r.type)}</span>` : ''}
+            ${r.type ? `<span class="rule-tag ${normalizeRuleTypeClass(r.type)}">${esc(r.type)}</span>` : ''}
             <span>${esc(r.raw)}</span>
           </div>
           <div class="actions">
@@ -30,6 +45,15 @@ export async function renderRules(container) {
       `).join('') : '<div class="empty">暂无规则，点击添加</div>'}
     </div>`
   attachRuleDrag()
+}
+
+function normalizeRuleTypeClass(type) {
+  const lower = String(type || '').toLowerCase()
+  if (lower.startsWith('domain')) return 'domain'
+  if (lower.includes('geoip') || lower.includes('ip-cidr') || lower.includes('ip-suffix') || lower.includes('ip-asn')) return 'geoip'
+  if (lower.includes('geosite')) return 'geosite'
+  if (lower === 'match') return 'match'
+  return 'domain'
 }
 
 function attachRuleDrag() {
@@ -77,64 +101,235 @@ async function saveRuleOrder() {
   } catch { toast('排序保存失败', 'error') }
 }
 
-export async function showRuleForm(index) {
-  let raw = ''
-  if (index !== undefined && index >= 0) {
-    const rules = await API.get('/api/config/rules')
-    raw = rules[index]?.raw || ''
+export async function showRuleForm(index, draft = null) {
+  activeRuleFormIndex = index
+
+  let state = draft
+  if (!state) {
+    if (index !== undefined && index >= 0) {
+      const rules = await API.get('/api/config/rules')
+      state = parseRuleForForm(rules[index]?.raw || '')
+    } else {
+      state = defaultRuleState()
+    }
   }
-  const parts = raw ? raw.split(',').map(s => s.trim()) : []
-  const type = parts[0] || 'MATCH'
-  const payload = parts[1] || ''
-  const proxy = parts[2] || ''
-  const noResolve = raw.includes('no-resolve')
 
   const allGroups = await API.get('/api/config/proxy-groups')
-  const proxyOptions = ['DIRECT', ...allGroups.map(g => g.name)]
-  if (proxy && !proxyOptions.includes(proxy)) proxyOptions.unshift(proxy)
+  const typeOptions = buildRuleTypeOptions(state.type)
+  const targetOptions = [...new Set([...COMMON_RULE_TARGETS, ...allGroups.map(g => g.name), state.target].filter(Boolean))]
 
   showModal(`
     <h3>${index !== undefined && index >= 0 ? '编辑' : '添加'}规则</h3>
-    <div class="form-group">
-      <label>规则类型</label>
-       <select id="rf-type" onchange="togglePickerBtns()">
-        ${RULE_TYPES.map(t => `<option value="${t}" ${type===t?'selected':''}>${t}</option>`).join('')}
-      </select>
-    </div>
-    <div class="form-group">
-      <label>参数 (payload)</label>
-      <div style="display:flex;gap:8px">
-        <input id="rf-payload" value="${esc(payload)}" style="flex:1" />
-        <button id="geosite-btn" class="btn-sm btn-warning" onclick="openGeositePicker()" style="display:${type==='GEOSITE'?'block':'none'}">GeoSite</button>
-        <button id="geoip-btn" class="btn-sm btn-warning" onclick="openGeoipPicker()" style="display:${type==='GEOIP'?'block':'none'}">GeoIP</button>
+    <div class="form-grid">
+      <div class="form-group">
+        <label>规则类型</label>
+        <select id="rf-type">
+          ${typeOptions.map(t => `<option value="${t}" ${t===state.type?'selected':''}>${t}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group">
+        <label id="rf-target-label">目标策略 / 代理组</label>
+        <input id="rf-target" list="rf-target-options" value="${esc(state.target || '')}" placeholder="如 Proxy、DIRECT、REJECT、sub-rule" />
+        <datalist id="rf-target-options">
+          ${targetOptions.map(o => `<option value="${esc(o)}"></option>`).join('')}
+        </datalist>
       </div>
     </div>
-    <div class="form-group"><label>代理组</label><select id="rf-proxy">${proxyOptions.map(o => `<option value="${esc(o)}" ${proxy===o?'selected':''}>${esc(o)}</option>`).join('')}</select></div>
-    <div class="form-group">
-      <label for="rf-noresolve" style="white-space: nowrap">
-        no-resolve
-        <input type="checkbox" id="rf-noresolve" ${noResolve?'checked':''} />
-      </label>
+
+    <div class="form-group" id="rf-payload-group">
+      <label>Payload / 条件</label>
+      <textarea id="rf-payload" rows="3" placeholder="例如 google.com、CN、80、((DOMAIN,baidu.com),(NETWORK,UDP))">${esc(state.payload || '')}</textarea>
+      <div class="form-help" id="rf-payload-help"></div>
+      <div class="picker-row">
+        <button id="geosite-btn" class="btn-sm btn-warning" onclick="openGeositePicker()" type="button">GeoSite</button>
+        <button id="geoip-btn" class="btn-sm btn-warning" onclick="openGeoipPicker()" type="button">GeoIP</button>
+      </div>
     </div>
+
+    <div class="form-grid">
+      <label class="checkbox-line" id="rf-noresolve-line">no-resolve <input type="checkbox" id="rf-noresolve" ${state.noResolve ? 'checked' : ''} /></label>
+      <label class="checkbox-line" id="rf-src-line">src <input type="checkbox" id="rf-src" ${state.src ? 'checked' : ''} /></label>
+      <div class="form-group">
+        <label>其它附加参数</label>
+        <input id="rf-extra-params" value="${esc((state.params || []).filter(p => p !== 'no-resolve' && p !== 'src').join(', '))}" placeholder="逗号分隔，例如 custom-flag" />
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>规则预览</label>
+      <textarea id="rf-preview" rows="3" readonly spellcheck="false" style="font-family:var(--font-mono);font-size:12px"></textarea>
+    </div>
+
     <div class="form-actions">
       <button class="btn-primary" onclick="saveRule(${index !== undefined && index >= 0 ? index : 'undefined'})">保存</button>
       <button onclick="closeModal()">取消</button>
     </div>
   `)
+
+  ;['rf-type', 'rf-target', 'rf-payload', 'rf-noresolve', 'rf-src', 'rf-extra-params'].forEach(id => {
+    document.getElementById(id)?.addEventListener(id === 'rf-type' ? 'change' : 'input', updateRuleFormUI)
+    if (id === 'rf-noresolve' || id === 'rf-src') document.getElementById(id)?.addEventListener('change', updateRuleFormUI)
+  })
+  updateRuleFormUI()
 }
 
-export function togglePickerBtns() {
-  const type = document.getElementById('rf-type').value
-  const gsBtn = document.getElementById('geosite-btn')
-  const giBtn = document.getElementById('geoip-btn')
-  if (gsBtn) gsBtn.style.display = type === 'GEOSITE' ? 'block' : 'none'
-  if (giBtn) giBtn.style.display = type === 'GEOIP' ? 'block' : 'none'
+function defaultRuleState() {
+  return {
+    type: 'DOMAIN-SUFFIX',
+    payload: '',
+    target: 'DIRECT',
+    params: [],
+    noResolve: false,
+    src: false,
+  }
 }
 
-export function toggleGeoSiteBtn() { togglePickerBtns() }
+function buildRuleTypeOptions(currentType) {
+  return currentType && !RULE_TYPES.includes(currentType) ? [currentType, ...RULE_TYPES] : RULE_TYPES
+}
+
+function parseRuleForForm(raw) {
+  const parts = splitRule(raw)
+  const type = parts[0] || 'DOMAIN-SUFFIX'
+  if (type.toUpperCase() === 'MATCH') {
+    const target = parts[2] || parts[1] || ''
+    const payload = parts.length >= 3 ? parts[1] : ''
+    const params = (parts.length >= 3 ? parts.slice(3) : parts.slice(2)).filter(Boolean)
+    return {
+      type,
+      payload,
+      target,
+      params,
+      noResolve: params.includes('no-resolve'),
+      src: params.includes('src'),
+    }
+  }
+  const payload = parts[1] || ''
+  const target = parts[2] || ''
+  const params = parts.slice(3).filter(Boolean)
+  return {
+    type,
+    payload,
+    target,
+    params,
+    noResolve: params.includes('no-resolve'),
+    src: params.includes('src'),
+  }
+}
+
+function splitRule(raw) {
+  const parts = []
+  let current = ''
+  let depth = 0
+  for (const ch of raw || '') {
+    if (ch === ',' && depth === 0) {
+      parts.push(current.trim())
+      current = ''
+      continue
+    }
+    if (ch === '(') depth += 1
+    if (ch === ')' && depth > 0) depth -= 1
+    current += ch
+  }
+  if (current || String(raw || '').endsWith(',')) parts.push(current.trim())
+  return parts
+}
+
+function buildRulePreview() {
+  const type = document.getElementById('rf-type')?.value || ''
+  const payload = document.getElementById('rf-payload')?.value?.trim() || ''
+  const target = document.getElementById('rf-target')?.value?.trim() || ''
+  const extras = new Set(
+    (document.getElementById('rf-extra-params')?.value || '')
+      .split(',')
+      .map(v => v.trim())
+      .filter(Boolean)
+  )
+  if (document.getElementById('rf-noresolve')?.checked) extras.add('no-resolve')
+  if (document.getElementById('rf-src')?.checked) extras.add('src')
+
+  const parts = [type]
+  if (type.toUpperCase() === 'MATCH' && !payload) {
+    parts.push(target)
+  } else {
+    parts.push(payload, target)
+  }
+  if (extras.size) parts.push(...extras)
+  return parts.join(',')
+}
+
+function getRuleTypeHint(type) {
+  switch (type) {
+    case 'MATCH':
+      return '匹配所有请求，通常只需要填写目标策略。'
+    case 'RULE-SET':
+      return 'payload 填 rule-provider 名称，目标填策略或代理组。'
+    case 'AND':
+    case 'OR':
+    case 'NOT':
+      return 'payload 需写逻辑表达式，例如 ((DOMAIN,baidu.com),(NETWORK,UDP))。'
+    case 'SUB-RULE':
+      return 'payload 例如 (NETWORK,tcp)，目标填 sub-rule 名称。'
+    case 'GEOSITE':
+      return 'payload 为 geosite 分类名，可用右侧按钮挑选。'
+    case 'GEOIP':
+      return 'payload 为国家/地区代码，如 CN、US。'
+    case 'NETWORK':
+      return 'payload 使用 tcp 或 udp。'
+    default:
+      return '按 Mihomo 规则语法填写 payload 和目标。'
+  }
+}
+
+export function updateRuleFormUI() {
+  const type = document.getElementById('rf-type')?.value || ''
+  const payloadGroup = document.getElementById('rf-payload-group')
+  const payloadHelp = document.getElementById('rf-payload-help')
+  const payload = document.getElementById('rf-payload')
+  const targetLabel = document.getElementById('rf-target-label')
+  const geositeBtn = document.getElementById('geosite-btn')
+  const geoipBtn = document.getElementById('geoip-btn')
+  const noResolveLine = document.getElementById('rf-noresolve-line')
+  const srcLine = document.getElementById('rf-src-line')
+
+  const payloadOptional = type.toUpperCase() === 'MATCH'
+  payloadGroup.style.display = ''
+  payloadHelp.textContent = getRuleTypeHint(type)
+  payload.placeholder = type.toUpperCase() === 'MATCH' ? 'MATCH 可留空' : '例如 google.com、CN、80、((DOMAIN,baidu.com),(NETWORK,UDP))'
+  targetLabel.textContent = type === 'SUB-RULE' ? '子规则名称' : '目标策略 / 代理组'
+  geositeBtn.style.display = type === 'GEOSITE' ? 'inline-flex' : 'none'
+  geoipBtn.style.display = type === 'GEOIP' ? 'inline-flex' : 'none'
+  const ipLike = ['IP-CIDR', 'IP-CIDR6', 'IP-SUFFIX', 'IP-ASN', 'GEOIP'].includes(type)
+  noResolveLine.style.display = ipLike ? 'flex' : 'none'
+  srcLine.style.display = ipLike ? 'flex' : 'none'
+  if (!ipLike) {
+    document.getElementById('rf-noresolve').checked = false
+    document.getElementById('rf-src').checked = false
+  }
+  if (payloadOptional && !payload.value.trim()) {
+    payload.value = ''
+  }
+  document.getElementById('rf-preview').value = buildRulePreview()
+}
+
+export function togglePickerBtns() { updateRuleFormUI() }
+export function toggleGeoSiteBtn() { updateRuleFormUI() }
+
+function captureRuleDraft() {
+  return {
+    index: activeRuleFormIndex,
+    type: document.getElementById('rf-type')?.value || 'GEOSITE',
+    payload: document.getElementById('rf-payload')?.value || '',
+    target: document.getElementById('rf-target')?.value || '',
+    params: (document.getElementById('rf-extra-params')?.value || '').split(',').map(v => v.trim()).filter(Boolean),
+    noResolve: !!document.getElementById('rf-noresolve')?.checked,
+    src: !!document.getElementById('rf-src')?.checked,
+  }
+}
 
 /* ============ GeoSite Picker ============ */
 export async function openGeositePicker() {
+  pendingRuleDraft = captureRuleDraft()
   try {
     const GEOX_URL = 'https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat'
     toast('正在浏览器端解析 geosite.dat...')
@@ -152,7 +347,7 @@ export async function openGeositePicker() {
         <h2>选择 GeoSite 分类</h2>
         <div class="form-group"><input id="gs-search" placeholder="搜索分类或域名..." oninput="filterGeosite()" /></div>
         <div class="geosite-categories" id="gs-list"></div>
-        <div class="form-actions" style="margin-top:16px"><button onclick="switchView('rules')">返回</button></div>
+        <div class="form-actions" style="margin-top:16px"><button onclick="showRuleFormFromDraft()">返回规则表单</button></div>
       </div>`
     window._geositeCategories = categories
     filterGeosite()
@@ -194,15 +389,17 @@ export function toggleGeositeCategory(el) {
 }
 
 export async function selectGeosite(category) {
+  const draft = pendingRuleDraft || defaultRuleState()
+  draft.type = 'GEOSITE'
+  draft.payload = category
+  pendingRuleDraft = draft
   closeModal()
-  await showRuleForm(-1)
-  document.getElementById('rf-type').value = 'GEOSITE'
-  document.getElementById('rf-payload').value = category
-  toggleGeoSiteBtn()
+  await showRuleFormFromDraft()
 }
 
 /* ============ GeoIP Picker ============ */
 export async function openGeoipPicker() {
+  pendingRuleDraft = captureRuleDraft()
   try {
     const GEOIP_URL = 'https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat'
     toast('正在浏览器端解析 geoip.dat...')
@@ -220,7 +417,7 @@ export async function openGeoipPicker() {
         <h2>选择 GeoIP 国家/地区</h2>
         <div class="form-group"><input id="gi-search" placeholder="搜索 (如 CN, US, JP)..." oninput="filterGeoip()" /></div>
         <div class="geosite-categories" id="gi-list"></div>
-        <div class="form-actions" style="margin-top:16px"><button onclick="switchView('rules')">返回</button></div>
+        <div class="form-actions" style="margin-top:16px"><button onclick="showRuleFormFromDraft()">返回规则表单</button></div>
       </div>`
     window._geoipCountries = countries
     filterGeoip()
@@ -241,25 +438,35 @@ export function filterGeoip() {
   list.innerHTML = filtered.length
     ? filtered.map(c => `<div class="gs-category-header" style="cursor:pointer;padding:8px 12px;border-radius:4px" onclick="selectGeoip('${esc(c.code)}')">
         <span class="gs-category-name">${esc(c.code)}</span>
-        <span style="color:var(--text-muted);font-size:12px;margin-left:8px">${esc(c.name)}</span>
+        <span style="color:var(--text-muted);font-size:12px;margin-left:8px">${esc(c.name || GEOIP_NAMES[c.code] || c.code)}</span>
       </div>`).join('')
     : '<div class="empty">无匹配</div>'
 }
 
 export async function selectGeoip(country) {
+  const draft = pendingRuleDraft || defaultRuleState()
+  draft.type = 'GEOIP'
+  draft.payload = country
+  pendingRuleDraft = draft
   closeModal()
-  await showRuleForm(-1)
-  document.getElementById('rf-type').value = 'GEOIP'
-  document.getElementById('rf-payload').value = country
-  togglePickerBtns()
+  await showRuleFormFromDraft()
+}
+
+export async function showRuleFormFromDraft() {
+  const draft = pendingRuleDraft || defaultRuleState()
+  const index = draft.index
+  pendingRuleDraft = null
+  return showRuleForm(index, draft)
 }
 
 export async function saveRule(index) {
-  const type = document.getElementById('rf-type').value
-  const payload = document.getElementById('rf-payload').value
-  const proxy = document.getElementById('rf-proxy').value
-  const noResolve = document.getElementById('rf-noresolve').checked
-  const raw = noResolve ? `${type},${payload},${proxy},no-resolve` : `${type},${payload},${proxy}`
+  const raw = buildRulePreview()
+  const type = document.getElementById('rf-type').value.trim()
+  const target = document.getElementById('rf-target').value.trim()
+  const payload = document.getElementById('rf-payload').value.trim()
+  if (!type) { toast('规则类型不能为空', 'error'); return }
+  if (!target) { toast('目标策略不能为空', 'error'); return }
+  if (type.toUpperCase() !== 'MATCH' && !payload) { toast('payload 不能为空', 'error'); return }
   try {
     if (index !== undefined && index >= 0) {
       await API.put(`/api/config/rules/${index}`, { raw })

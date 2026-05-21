@@ -18,6 +18,7 @@ const baseManifest = JSON.parse(fs.readFileSync(path.join(extDir, 'manifest.json
 copyDir(path.join(extDir, 'src'), path.join(distChrome, 'src'))
 copyDir(path.join(extDir, 'icons'), path.join(distChrome, 'icons'))
 const chromeManifest = { ...baseManifest }
+delete chromeManifest.browser_specific_settings
 if (chromeManifest.background && chromeManifest.background.scripts) {
   chromeManifest.background = {
     service_worker: chromeManifest.background.scripts[0]

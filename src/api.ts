@@ -340,5 +340,25 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     return json({ ok: true, ruleCount: rules.length })
   }
 
+  if (path === '/api/rules/update-by-key' && method === 'POST') {
+    const body = await parseBody(request)
+    const key = String(body.key || '')
+    const oldRule = String(body.oldRule || '')
+    const newRule = String(body.newRule || '')
+    if (!key || !oldRule || !newRule) return json({ error: 'key, oldRule and newRule are required' }, 400)
+    const valid = await verifyAccessKey(env, key)
+    if (!valid) return json({ error: 'Forbidden' }, 403)
+
+    const config = await getParsedConfig(env)
+    const rules = config.rules || []
+    const idx = rules.indexOf(oldRule)
+    if (idx === -1) return json({ error: 'Rule not found' }, 404)
+
+    rules[idx] = newRule
+    config.rules = rules
+    await saveConfig(env, serializeConfig(config))
+    return json({ ok: true, ruleCount: rules.length })
+  }
+
   return json({ error: 'Not found' }, 404)
 }

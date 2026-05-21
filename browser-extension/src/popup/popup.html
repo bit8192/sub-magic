@@ -11,19 +11,16 @@
 		<h1>Sub Magic</h1>
 	</div>
 
-	<div class="section">
-		<div class="section-title">当前站点</div>
-		<div id="current-domain" class="domain-badge">加载中...</div>
-	</div>
-
 	<div class="section" id="routing-section" style="display:none">
-		<div class="section-title">路由查询</div>
-		<button id="btn-query-routing" class="btn btn-primary">查询路由链路</button>
-		<div id="routing-result" class="result-box"></div>
+		<div class="section-title">路由链路 <span id="routing-status" class="routing-status loading">连接中...</span></div>
+		<div id="routing-result" class="routing-result"></div>
 	</div>
 
 	<div class="section" id="rule-section" style="display:none">
-		<div class="section-title">添加规则</div>
+		<div class="section-title" style="gap:8px">
+			<button id="btn-back-routing" class="btn-icon" title="返回路由链路">&#8592;</button>
+			<span id="rule-panel-title">添加规则</span>
+		</div>
 		<div class="form-group">
 			<label>规则类型</label>
 			<select id="rule-type">
@@ -34,6 +31,7 @@
 				<option value="GEOIP">GEOIP</option>
 				<option value="IP-CIDR">IP-CIDR</option>
 				<option value="SRC-IP-CIDR">SRC-IP-CIDR</option>
+				<option value="RULE-SET">RULE-SET</option>
 				<option value="MATCH">MATCH</option>
 			</select>
 		</div>
@@ -43,12 +41,23 @@
 		</div>
 		<div class="form-group">
 			<label>代理组/策略</label>
-			<input type="text" id="rule-proxy" placeholder="Proxy" />
+			<select id="rule-proxy-select">
+				<option value="">加载中...</option>
+			</select>
+			<input type="text" id="rule-proxy-input" placeholder="自定义..." style="display:none" />
 		</div>
-		<div class="form-actions">
-			<button id="btn-add-rule-local" class="btn btn-primary">添加到本地</button>
-			<button id="btn-add-rule-remote" class="btn btn-secondary">添加到远程</button>
-			<button id="btn-add-rule-both" class="btn btn-accent">同时添加</button>
+		<div class="form-group" id="no-resolve-group" style="display:none">
+			<label for="rule-no-resolve">
+				<input type="checkbox" id="rule-no-resolve" />
+				no-resolve
+			</label>
+		</div>
+		<div class="form-actions" id="btn-group-add">
+			<button id="btn-add-rule" class="btn btn-primary">添加规则</button>
+		</div>
+		<div class="form-actions" id="btn-group-edit" style="display:none">
+			<button id="btn-save-rule" class="btn btn-primary">保存修改</button>
+			<button id="btn-delete-rule" class="btn btn-danger">删除</button>
 		</div>
 		<div id="rule-result" class="result-box"></div>
 	</div>

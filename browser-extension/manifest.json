@@ -1,7 +1,7 @@
 {
 	"manifest_version": 3,
 	"name": "Sub Magic - Mihomo Rule Manager",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"description": "查询当前站点的路由链路并快速添加 mihomo 规则",
 	"browser_specific_settings": {
 		"gecko": {
@@ -12,7 +12,7 @@
 			}
 		}
 	},
-	"permissions": ["storage", "activeTab", "tabs"],
+	"permissions": ["storage", "activeTab", "tabs", "webRequest"],
 	"host_permissions": ["<all_urls>"],
 	"action": {
 		"default_title": "Sub Magic",

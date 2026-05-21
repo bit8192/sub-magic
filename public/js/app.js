@@ -6,7 +6,7 @@ import { copySubUrl, rotateKey, copyAutoScript, generateAutoScript } from './vie
 import { showProviderForm, saveProvider, deleteProvider } from './views/providers.js'
 // Provider usage functions are assigned to window inside providers.js
 import { showGroupForm, saveGroup, deleteGroup } from './views/groups.js'
-import { showRuleForm, saveRule, deleteRule, togglePickerBtns, toggleGeoSiteBtn, openGeositePicker, filterGeosite, toggleGeositeCategory, selectGeosite, openGeoipPicker, filterGeoip, selectGeoip } from './views/rules.js'
+import { showRuleForm, saveRule, deleteRule, togglePickerBtns, toggleGeoSiteBtn, updateRuleFormUI, openGeositePicker, filterGeosite, toggleGeositeCategory, selectGeosite, openGeoipPicker, filterGeoip, selectGeoip, showRuleFormFromDraft } from './views/rules.js'
 import { saveEditor } from './views/editor.js'
 import { saveVersion, viewVersion, restoreVersion, deleteVersion } from './views/versions.js'
 
@@ -42,6 +42,7 @@ Object.assign(window, {
   deleteRule,
   togglePickerBtns,
   toggleGeoSiteBtn,
+  updateRuleFormUI,
   openGeositePicker,
   filterGeosite,
   toggleGeositeCategory,
@@ -49,6 +50,7 @@ Object.assign(window, {
   openGeoipPicker,
   filterGeoip,
   selectGeoip,
+  showRuleFormFromDraft,
   saveEditor,
   saveVersion,
   viewVersion,

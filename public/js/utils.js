@@ -12,12 +12,13 @@ export function toast(msg, type = 'info') {
   setTimeout(() => el.remove(), 3000)
 }
 
-export function showModal(html) {
+export function showModal(html, modalClass = '') {
   closeModal()
   const overlay = document.createElement('div')
   overlay.className = 'modal-overlay'
   overlay.id = 'modal-overlay'
-  overlay.innerHTML = `<div class="modal">${html}</div>`
+  const className = modalClass ? `modal ${modalClass}` : 'modal'
+  overlay.innerHTML = `<div class="${className}">${html}</div>`
   overlay.addEventListener('click', e => { if (e.target === overlay) closeModal() })
   document.body.appendChild(overlay)
 }
