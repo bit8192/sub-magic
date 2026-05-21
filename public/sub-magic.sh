@@ -41,9 +41,9 @@ if [ ! -s "$TEMP_FILE" ]; then
 fi
 
 NEW_ETAG=$(grep -i '^etag:' "$HEADERS_FILE" | head -1 | sed 's/.*: *//' | tr -d '\r')
-[ -n "$NEW_ETAG" ] && echo "$NEW_ETAG" > "$ETAG_FILE"
-mv "$TEMP_FILE" "$CONFIG_PATH"
+cp "$TEMP_FILE" "$CONFIG_PATH"
 echo "[$(date)] Config updated: $CONFIG_PATH"
+[ -n "$NEW_ETAG" ] && echo "$NEW_ETAG" > "$ETAG_FILE"
 
 CONTROLLER=$(grep -m1 '^\s*external-controller:' "$CONFIG_PATH" | sed -e 's/.*: *//' -e "s/^['\"]//" -e "s/['\"]$//")
 SECRET=$(grep -m1 '^\s*secret:' "$CONFIG_PATH" | sed -e 's/.*: *//' -e "s/^['\"]//" -e "s/['\"]$//")
