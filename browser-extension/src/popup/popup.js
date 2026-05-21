@@ -1,4 +1,16 @@
-import { parseRuleDisplay, findRuleByConnection, addRuleLocal, addRuleRemote, updateRuleRemote, waitForRuleUpdate, waitForRulePresent, deleteRule } from '../utils/api.js'
+import {
+	parseRuleDisplay,
+	findRuleByConnection,
+	addRuleLocal,
+	addRuleRemote,
+	updateRuleRemote,
+	waitForRuleUpdate,
+	waitForRulePresent,
+	deleteRule,
+	getProxySnapshot,
+	getProxyProviders,
+	setProxySelector,
+} from '../utils/api.js'
 
 const state = {
 	domain: '',
@@ -6,11 +18,15 @@ const state = {
 	mihomo: { url: '', secret: '' },
 	subMagic: { url: '', accessKey: '' },
 	proxyGroups: [],
+	proxyMap: {},
+	proxyProviders: {},
 	ruleMode: null,
 	editingRule: null,
+	currentSelector: '',
 }
 
 let pollTimer = null
+let proxyRefreshTimer = null
 
 document.addEventListener('DOMContentLoaded', async () => {
 	await loadSettings()
@@ -20,8 +36,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 	document.getElementById('btn-save-rule').addEventListener('click', handleSaveRule)
 	document.getElementById('btn-delete-rule').addEventListener('click', handleDeleteRule)
 	document.getElementById('btn-back-routing').addEventListener('click', showRoutingPanel)
+	document.getElementById('btn-back-selector').addEventListener('click', showRoutingPanel)
 	document.getElementById('btn-settings').addEventListener('click', () => chrome.runtime.openOptionsPage())
 	document.getElementById('rule-type').addEventListener('change', onRuleTypeChange)
+	document.getElementById('selector-result').addEventListener('click', handleSelectorResultClick)
 
 	const proxySelect = document.getElementById('rule-proxy-select')
 	proxySelect.addEventListener('change', () => {
@@ -34,11 +52,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 	})
 
 	if (state.mihomo.url) {
-		startRoutingPoll()
+		await refreshProxyData(true)
+		await startRoutingPoll()
 	}
 
 	window.addEventListener('pagehide', () => {
 		if (pollTimer) clearInterval(pollTimer)
+		if (proxyRefreshTimer) clearInterval(proxyRefreshTimer)
 	})
 })
 
@@ -81,18 +101,25 @@ async function startRoutingPoll() {
 	statusEl.textContent = '获取中...'
 	statusEl.className = 'routing-status loading'
 
-	const resp = await chrome.runtime.sendMessage({ type: 'POLL', tabId: state.tabId })
-	handleBackgroundResponse(resp)
+	await pollRouting()
 
 	pollTimer = setInterval(async () => {
-		const resp = await chrome.runtime.sendMessage({ type: 'POLL', tabId: state.tabId })
-		handleBackgroundResponse(resp)
+		await pollRouting()
 	}, 2000)
+
+	proxyRefreshTimer = setInterval(async () => {
+		await refreshProxyData()
+	}, 10000)
+}
+
+async function pollRouting() {
+	const resp = await chrome.runtime.sendMessage({ type: 'POLL', tabId: state.tabId })
+	handleBackgroundResponse(resp)
 }
 
 function handleBackgroundResponse(resp) {
 	if (!resp) return
-	if (resp.proxyGroups) {
+	if (resp.proxyGroups && state.proxyGroups.length === 0) {
 		state.proxyGroups = resp.proxyGroups
 		populateProxyOptions()
 	}
@@ -101,18 +128,54 @@ function handleBackgroundResponse(resp) {
 	}
 }
 
+async function refreshProxyData(initial = false) {
+	if (!state.mihomo.url) return
+
+	try {
+		const [proxyMap, proxyProviders] = await Promise.all([
+			getProxySnapshot(state.mihomo.url, state.mihomo.secret),
+			getProxyProviders(state.mihomo.url, state.mihomo.secret),
+		])
+
+		state.proxyMap = proxyMap
+		state.proxyProviders = proxyProviders
+		state.proxyGroups = buildProxyGroups(proxyMap)
+		populateProxyOptions()
+
+		if (state.currentSelector && document.getElementById('selector-section').style.display !== 'none') {
+			renderSelectorPanel(state.currentSelector)
+		}
+	} catch (error) {
+		if (initial) {
+			const statusEl = document.getElementById('routing-status')
+			statusEl.textContent = `代理信息获取失败: ${error.message}`
+			statusEl.className = 'routing-status error'
+		}
+	}
+}
+
+function buildProxyGroups(proxyMap) {
+	return Object.values(proxyMap)
+		.filter(proxy => proxy?.name && proxy.type && proxy.type !== 'Direct' && proxy.type !== 'Reject')
+		.map(proxy => ({
+			name: proxy.name,
+			type: proxy.type,
+			now: proxy.now || '',
+		}))
+}
+
 function populateProxyOptions() {
 	const select = document.getElementById('rule-proxy-select')
 	const currentValue = getProxyValue()
 	let options = ''
-	for (const g of state.proxyGroups) {
-		const selected = g.now ? ` (${g.now})` : ''
-		options += `<option value="${escHtml(g.name)}">${escHtml(g.name)}${selected}</option>`
+	for (const group of state.proxyGroups) {
+		const selected = group.now ? ` (${group.now})` : ''
+		options += `<option value="${escAttr(group.name)}">${escHtml(group.name)}${escHtml(selected)}</option>`
 	}
-	options += `<option value="DIRECT">DIRECT</option>`
-	options += `<option value="REJECT">REJECT</option>`
-	options += `<option value="REJECT-DROP">REJECT-DROP</option>`
-	options += `<option value="__custom__">自定义...</option>`
+	options += '<option value="DIRECT">DIRECT</option>'
+	options += '<option value="REJECT">REJECT</option>'
+	options += '<option value="REJECT-DROP">REJECT-DROP</option>'
+	options += '<option value="__custom__">自定义...</option>'
 	select.innerHTML = options
 	setProxyValue(currentValue)
 }
@@ -128,7 +191,7 @@ function getProxyValue() {
 function setProxyValue(value) {
 	const select = document.getElementById('rule-proxy-select')
 	const input = document.getElementById('rule-proxy-input')
-	if (state.proxyGroups.some(g => g.name === value) || ['DIRECT', 'REJECT', 'REJECT-DROP'].includes(value)) {
+	if (state.proxyGroups.some(group => group.name === value) || ['DIRECT', 'REJECT', 'REJECT-DROP'].includes(value)) {
 		select.value = value
 		input.style.display = 'none'
 		input.value = ''
@@ -170,6 +233,7 @@ function updateRoutingDisplay(data) {
 	if (!data.groups || data.groups.length === 0) {
 		statusEl.textContent = `监控中 · 命中 ${data.total} 连接`
 		statusEl.className = 'routing-status connected'
+		resultEl.innerHTML = '<div class="routing-empty">当前域名暂无命中链路</div>'
 		return
 	}
 
@@ -177,20 +241,22 @@ function updateRoutingDisplay(data) {
 	statusEl.className = 'routing-status connected'
 
 	let html = ''
-	for (const g of data.groups) {
-		const ruleStr = g.rule ? formatRule(g.rule, g.rulePayload) : ''
-		const chainStr = g.chain.length > 0 ? [...g.chain].reverse().join(' → ') : 'DIRECT'
+	for (const group of data.groups) {
+		const ruleStr = group.rule ? formatRule(group.rule, group.rulePayload) : ''
+		const chainHtml = renderChain(group.chain)
 
 		html += `<div class="route-card">
 			<div class="route-header">
-				<span class="route-count">${g.count}</span>
-				<span class="route-host" title="${g.host}">${escHtml(g.host)}</span>
+				<span class="route-count">${group.count}</span>
+				<span class="route-host" title="${escAttr(group.host)}">${escHtml(group.host)}</span>
 			</div>
-			<div class="route-chain-line">${escHtml(chainStr)}</div>`
+			<div class="route-chain-line">${chainHtml}</div>`
+
 		if (ruleStr) {
-			html += `<div class="route-rule-line" data-rule="${escHtml(g.rule)}" data-rule-payload="${escHtml(g.rulePayload || '')}">${escHtml(ruleStr)}</div>`
+			html += `<div class="route-rule-line" data-rule="${escAttr(group.rule)}" data-rule-payload="${escAttr(group.rulePayload || '')}">${escHtml(ruleStr)}</div>`
 		}
-		html += `</div>`
+
+		html += '</div>'
 	}
 
 	resultEl.innerHTML = html
@@ -198,6 +264,7 @@ function updateRoutingDisplay(data) {
 	resultEl.querySelectorAll('.route-host').forEach(el => {
 		el.addEventListener('click', () => showAddPanel(el.textContent.trim()))
 	})
+
 	resultEl.querySelectorAll('.route-rule-line').forEach(el => {
 		const rule = el.getAttribute('data-rule') || ''
 		if (rule) {
@@ -205,17 +272,37 @@ function updateRoutingDisplay(data) {
 			el.addEventListener('click', () => handleEditRuleClick(rule, rulePayload))
 		}
 	})
+
+	resultEl.querySelectorAll('.route-chain-selector').forEach(el => {
+		el.addEventListener('click', () => openSelectorPanel(el.getAttribute('data-proxy') || ''))
+	})
+}
+
+function renderChain(chain) {
+	const items = Array.isArray(chain) && chain.length > 0 ? [...chain].reverse() : ['DIRECT']
+	return items.map(renderChainToken).join(' <span class="route-chain-token">→</span> ')
+}
+
+function renderChainToken(name) {
+	const proxy = state.proxyMap[name]
+	if (proxy?.type === 'Selector') {
+		return `<button class="route-chain-token route-chain-selector" data-proxy="${escAttr(name)}" title="点击选择 ${escAttr(name)} 的下游链路">${escHtml(name)}</button>`
+	}
+	return `<span class="route-chain-token">${escHtml(name)}</span>`
 }
 
 function showRoutingPanel() {
-	document.getElementById('routing-section').style.display = ''
+	document.getElementById('routing-section').style.display = state.mihomo.url ? '' : 'none'
 	document.getElementById('rule-section').style.display = 'none'
+	document.getElementById('selector-section').style.display = 'none'
 	state.ruleMode = null
 	state.editingRule = null
+	state.currentSelector = ''
 }
 
 function showAddPanel(domain) {
 	document.getElementById('routing-section').style.display = 'none'
+	document.getElementById('selector-section').style.display = 'none'
 	document.getElementById('rule-section').style.display = ''
 	document.getElementById('rule-panel-title').textContent = '添加规则'
 	document.getElementById('btn-group-add').style.display = ''
@@ -234,6 +321,7 @@ function showAddPanel(domain) {
 
 function showEditPanel(ruleStr) {
 	document.getElementById('routing-section').style.display = 'none'
+	document.getElementById('selector-section').style.display = 'none'
 	document.getElementById('rule-section').style.display = ''
 	document.getElementById('rule-panel-title').textContent = '修改规则'
 	document.getElementById('btn-group-add').style.display = 'none'
@@ -251,6 +339,151 @@ function showEditPanel(ruleStr) {
 	clearRuleResult()
 }
 
+async function openSelectorPanel(proxyName) {
+	if (!proxyName) return
+
+	state.currentSelector = proxyName
+	document.getElementById('routing-section').style.display = 'none'
+	document.getElementById('rule-section').style.display = 'none'
+	document.getElementById('selector-section').style.display = ''
+	document.getElementById('selector-panel-title').textContent = proxyName
+	document.getElementById('selector-meta').innerHTML = '<span class="spinner"></span>加载链路中...'
+	document.getElementById('selector-result').innerHTML = ''
+
+	try {
+		await refreshProxyData()
+		renderSelectorPanel(proxyName)
+	} catch (error) {
+		document.getElementById('selector-meta').textContent = `加载失败: ${error.message}`
+		document.getElementById('selector-result').innerHTML = ''
+	}
+}
+
+function renderSelectorPanel(proxyName) {
+	const proxy = state.proxyMap[proxyName]
+	const metaEl = document.getElementById('selector-meta')
+	const resultEl = document.getElementById('selector-result')
+
+	if (!proxy) {
+		metaEl.textContent = '未找到代理组信息'
+		resultEl.innerHTML = ''
+		return
+	}
+
+	const providerEntry = state.proxyProviders[proxyName]
+	const providerProxies = Array.isArray(providerEntry?.proxies) ? providerEntry.proxies : []
+	const providerByName = new Map(providerProxies.map(item => [item.name, item]))
+	const candidateNames = Array.isArray(proxy.all)
+		? proxy.all
+		: providerProxies.map(item => item.name)
+
+	metaEl.innerHTML = `类型: <strong>${escHtml(proxy.type || '-')}</strong><br>当前选择: <strong>${escHtml(proxy.now || '-')}</strong>`
+
+	if (candidateNames.length === 0) {
+		resultEl.innerHTML = '<div class="selector-empty">该代理组没有可选下游链路</div>'
+		return
+	}
+
+	let html = ''
+	for (const name of candidateNames) {
+		const candidate = providerByName.get(name) || state.proxyMap[name] || { name }
+		const isCurrent = proxy.now === name
+		const delayInfo = resolveProxyDelay(name)
+		const latencyTone = getLatencyTone(delayInfo?.delay)
+		const latencyText = formatLatency(delayInfo?.delay)
+		const delaySource = delayInfo?.sourceName && delayInfo.sourceName !== name
+			? `当前出口: ${delayInfo.sourceName}`
+			: candidate.type || state.proxyMap[name]?.type || 'Unknown'
+
+		html += `<button class="selector-item${isCurrent ? ' is-current' : ''}" data-proxy="${escAttr(proxyName)}" data-target="${escAttr(name)}"${isCurrent ? ' disabled' : ''}>
+			<div class="selector-main">
+				<div class="selector-name">${escHtml(name)}</div>
+				<div class="selector-sub">${escHtml(delaySource)}</div>
+			</div>
+			<div class="selector-latency ${latencyTone}">${escHtml(latencyText)}</div>
+		</button>`
+	}
+
+	resultEl.innerHTML = html
+}
+
+async function handleSelectorResultClick(event) {
+	const button = event.target.closest('.selector-item')
+	if (!button || button.disabled) return
+
+	const proxyName = button.getAttribute('data-proxy') || ''
+	const targetName = button.getAttribute('data-target') || ''
+	if (!proxyName || !targetName) return
+
+	const metaEl = document.getElementById('selector-meta')
+	metaEl.innerHTML = '<span class="spinner"></span>切换链路中...'
+
+	try {
+		await setProxySelector(state.mihomo.url, state.mihomo.secret, proxyName, targetName)
+		await refreshProxyData()
+		renderSelectorPanel(proxyName)
+		const proxy = state.proxyMap[proxyName]
+		metaEl.innerHTML = `类型: <strong>${escHtml(proxy?.type || '-')}</strong><br>当前选择: <strong>${escHtml(proxy?.now || targetName)}</strong><br>已切换成功`
+	} catch (error) {
+		metaEl.textContent = `切换失败: ${error.message}`
+	}
+}
+
+function resolveProxyDelay(proxyName, visited = new Set()) {
+	if (!proxyName || visited.has(proxyName)) return null
+	visited.add(proxyName)
+
+	const proxy = state.proxyMap[proxyName]
+	if (!proxy) return null
+
+	const directDelay = extractLatestDelay(proxy)
+	if (directDelay !== null) {
+		return { delay: directDelay, sourceName: proxyName }
+	}
+
+	if (proxy.now && proxy.now !== proxyName) {
+		return resolveProxyDelay(proxy.now, visited)
+	}
+
+	return null
+}
+
+function extractLatestDelay(proxy) {
+	const delay = extractDelayFromHistory(proxy?.history)
+	if (delay !== null) return delay
+
+	for (const value of Object.values(proxy?.extra || {})) {
+		const extraDelay = extractDelayFromHistory(value?.history)
+		if (extraDelay !== null) return extraDelay
+	}
+
+	return null
+}
+
+function extractDelayFromHistory(history) {
+	if (!Array.isArray(history)) return null
+	for (let i = history.length - 1; i >= 0; i--) {
+		const delay = history[i]?.delay
+		if (typeof delay === 'number' && delay >= 0) {
+			return delay
+		}
+	}
+	return null
+}
+
+function getLatencyTone(delay) {
+	if (typeof delay !== 'number') return 'unknown'
+	if (delay <= 150) return 'good'
+	if (delay <= 300) return 'ok'
+	if (delay <= 600) return 'warn'
+	return 'bad'
+}
+
+function formatLatency(delay) {
+	if (typeof delay !== 'number') return '未知'
+	return `${delay} ms`
+}
+
 function clearRuleResult() {
 	const resultEl = document.getElementById('rule-result')
 	resultEl.textContent = ''
@@ -259,13 +492,22 @@ function clearRuleResult() {
 
 function formatRule(rule, rulePayload) {
 	if (!rule) return ''
-	const i = rule.indexOf(',')
-	if (i === -1) return rulePayload ? `${rule}:${rulePayload}` : rule
-	return rule.substring(0, i) + ':' + (rulePayload || rule.substring(i + 1))
+	const index = rule.indexOf(',')
+	if (index === -1) return rulePayload ? `${rule}:${rulePayload}` : rule
+	return rule.substring(0, index) + ':' + (rulePayload || rule.substring(index + 1))
 }
 
-function escHtml(s) {
-	return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+function escHtml(value) {
+	return String(value)
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+}
+
+function escAttr(value) {
+	return escHtml(value)
+		.replace(/"/g, '&quot;')
+		.replace(/'/g, '&#39;')
 }
 
 function onRuleTypeChange() {
@@ -305,9 +547,9 @@ async function handleEditRuleClick(ruleType, rulePayload) {
 		}
 
 		showEditPanel(fullRule)
-	} catch (e) {
+	} catch (error) {
 		showEditPanel(fallbackRule)
-		resultEl.textContent = `读取原始规则失败: ${e.message}`
+		resultEl.textContent = `读取原始规则失败: ${error.message}`
 		resultEl.className = 'result-box error'
 	}
 }
@@ -332,7 +574,9 @@ async function handleAddRule() {
 		return
 	}
 
+	const hasLocal = !!state.mihomo.url
 	const hasRemote = !!(state.subMagic.url && state.subMagic.accessKey)
+
 	if (!hasRemote) {
 		resultEl.textContent = '未配置 Sub Magic 远程规则接口'
 		resultEl.className = 'result-box error'
@@ -340,7 +584,6 @@ async function handleAddRule() {
 	}
 
 	const ruleStr = buildRuleString(ruleType, rulePayload, ruleProxy)
-
 	const messages = []
 	resultEl.innerHTML = '<span class="spinner"></span>添加中...'
 
@@ -349,33 +592,32 @@ async function handleAddRule() {
 			try {
 				await addRuleLocal(state.mihomo.url, state.mihomo.secret, ruleStr)
 				messages.push('本地添加成功')
-			} catch (e) {
-				messages.push(`本地添加失败: ${e.message}`)
+			} catch (error) {
+				messages.push(`本地添加失败: ${error.message}`)
 			}
 		}
-		if (hasRemote) {
-			try {
-				await addRuleRemote(state.subMagic.url, state.subMagic.accessKey, ruleStr)
-				if (hasLocal) {
-					resultEl.innerHTML = '<span class="spinner"></span>远程添加成功，等待本地 Mihomo 生效...'
-					const verifyResult = await waitForRulePresent(state.mihomo.url, state.mihomo.secret, ruleStr)
-					if (verifyResult.ok) {
-						messages.push(`远程添加成功，本地 Mihomo 已生效（${verifyResult.attempts}s）`)
-					} else {
-						messages.push('远程添加成功，但本地 Mihomo 在 30 秒内未检测到规则生效，请手动检查订阅更新状态')
-					}
+
+		try {
+			await addRuleRemote(state.subMagic.url, state.subMagic.accessKey, ruleStr)
+			if (hasLocal) {
+				resultEl.innerHTML = '<span class="spinner"></span>远程添加成功，等待本地 Mihomo 生效...'
+				const verifyResult = await waitForRulePresent(state.mihomo.url, state.mihomo.secret, ruleStr)
+				if (verifyResult.ok) {
+					messages.push(`远程添加成功，本地 Mihomo 已生效（${verifyResult.attempts}s）`)
 				} else {
-					messages.push('远程添加成功')
+					messages.push('远程添加成功，但本地 Mihomo 在 30 秒内未检测到规则生效，请手动检查订阅更新状态')
 				}
-			} catch (e) {
-				messages.push(`远程添加失败: ${e.message}`)
+			} else {
+				messages.push('远程添加成功')
 			}
+		} catch (error) {
+			messages.push(`远程添加失败: ${error.message}`)
 		}
 
 		resultEl.textContent = messages.join('\n')
 		resultEl.className = messages.some(message => message.includes('失败') || message.includes('未检测到')) ? 'result-box error' : 'result-box success'
-	} catch (e) {
-		resultEl.textContent = `操作失败: ${e.message}`
+	} catch (error) {
+		resultEl.textContent = `操作失败: ${error.message}`
 		resultEl.className = 'result-box error'
 	}
 }
@@ -409,7 +651,6 @@ async function handleSaveRule() {
 	}
 
 	const newRuleStr = buildRuleString(ruleType, rulePayload, ruleProxy)
-
 	if (!state.editingRule) {
 		resultEl.textContent = '编辑状态丢失'
 		resultEl.className = 'result-box error'
@@ -437,8 +678,8 @@ async function handleSaveRule() {
 		state.editingRule = newRuleStr
 		resultEl.textContent = '远程修改成功'
 		resultEl.className = 'result-box success'
-	} catch (e) {
-		resultEl.textContent = `远程修改失败: ${e.message}`
+	} catch (error) {
+		resultEl.textContent = `远程修改失败: ${error.message}`
 		resultEl.className = 'result-box error'
 	}
 }
@@ -461,8 +702,8 @@ async function handleDeleteRule() {
 		state.editingRule = null
 		resultEl.textContent = '删除成功'
 		resultEl.className = 'result-box success'
-	} catch (e) {
-		resultEl.textContent = `删除失败: ${e.message}`
+	} catch (error) {
+		resultEl.textContent = `删除失败: ${error.message}`
 		resultEl.className = 'result-box error'
 	}
 }

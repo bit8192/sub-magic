@@ -103,10 +103,10 @@ function getMergedGroups(tabId) {
 }
 
 async function getProxyGroups() {
-	const data = await mihomoFetch(config.url, config.secret, '/group')
-	const proxies = data.proxies || []
-	return proxies
-		.filter(p => p.type && p.type !== 'Direct' && p.type !== 'Reject')
+	const data = await mihomoFetch(config.url, config.secret, '/proxies')
+	const proxies = data.proxies || {}
+	return Object.values(proxies)
+		.filter(p => p?.name && p.type && p.type !== 'Direct' && p.type !== 'Reject')
 		.map(p => ({ name: p.name, type: p.type, now: p.now || '' }))
 }
 

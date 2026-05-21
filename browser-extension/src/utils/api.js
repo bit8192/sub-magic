@@ -216,11 +216,33 @@ export async function addRuleLocal(mihomoUrl, secret, ruleStr) {
 }
 
 export async function getProxyGroups(url, secret) {
-	const data = await mihomoFetch(url, secret, '/group')
-	const proxies = data.proxies || []
-	return proxies
-		.filter(p => p.type && p.type !== 'Direct' && p.type !== 'Reject')
+	const data = await mihomoFetch(url, secret, '/proxies')
+	const proxies = data.proxies || {}
+	return Object.values(proxies)
+		.filter(p => p?.name && p.type && p.type !== 'Direct' && p.type !== 'Reject')
 		.map(p => ({ name: p.name, type: p.type, now: p.now || '' }))
+}
+
+export async function getProxySnapshot(url, secret) {
+	const data = await mihomoFetch(url, secret, '/proxies')
+	return data.proxies || {}
+}
+
+export async function getProxyProviders(url, secret) {
+	const data = await mihomoFetch(url, secret, '/providers/proxies')
+	return data.providers || {}
+}
+
+export async function setProxySelector(url, secret, proxyName, targetName) {
+	await mihomoFetch(url, secret, `/proxies/${encodeURIComponent(proxyName)}`, {
+		method: 'PUT',
+		headers: {
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({ name: targetName }),
+	})
+
+	return { ok: true }
 }
 
 export async function updateRule(mihomoUrl, secret, oldRule, newRule) {
