@@ -23,10 +23,7 @@ HTTP_STATUS=$(curl -sS -L -o "$TEMP_FILE" -D "$HEADERS_FILE" -w "%{http_code}" \
 	"$SUB_URL")
 
 if [ "$HTTP_STATUS" = "304" ]; then
-	exit 0
-fi
-
-if [ "$HTTP_STATUS" = "204" ]; then
+	echo "[$(date)] No config change (304)"
 	exit 0
 fi
 
@@ -45,8 +42,8 @@ cp "$TEMP_FILE" "$CONFIG_PATH"
 echo "[$(date)] Config updated: $CONFIG_PATH"
 [ -n "$NEW_ETAG" ] && echo "$NEW_ETAG" > "$ETAG_FILE"
 
-CONTROLLER=$(grep -m1 '^\s*external-controller:' "$CONFIG_PATH" | sed -e 's/.*: *//' -e "s/^['\"]//" -e "s/['\"]$//")
-SECRET=$(grep -m1 '^\s*secret:' "$CONFIG_PATH" | sed -e 's/.*: *//' -e "s/^['\"]//" -e "s/['\"]$//")
+CONTROLLER=$(grep -m1 '^\s*external-controller:' "$CONFIG_PATH" | sed -E -e 's/^[[:space:]]*external-controller:[[:space:]]*//' -e "s/^['\"]//" -e "s/['\"]$//")
+SECRET=$(grep -m1 '^\s*secret:' "$CONFIG_PATH" | sed -E -e 's/^[[:space:]]*secret:[[:space:]]*//' -e "s/^['\"]//" -e "s/['\"]$//")
 
 if [ -n "$CONTROLLER" ]; then
 	if [ -n "$SECRET" ]; then

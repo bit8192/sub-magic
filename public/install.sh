@@ -19,10 +19,10 @@ echo "Interval:   $INTERVAL"
 
 CONFIG_DIR=$(dirname "$CONFIG_PATH")
 
-ensure_config_writable() {
+ensure_config_access() {
 	local current_group=""
 
-	if [ -w "$CONFIG_PATH" ]; then
+	if [ -r "$CONFIG_PATH" ] && [ -w "$CONFIG_PATH" ]; then
 		return 0
 	fi
 
@@ -51,21 +51,21 @@ ensure_config_writable() {
 
 	current_group="$(id -gn)"
 	sudo chgrp "$current_group" "$CONFIG_PATH"
-	sudo chmod g+w "$CONFIG_PATH"
+	sudo chmod g+rw "$CONFIG_PATH"
 
-	if [ ! -w "$CONFIG_PATH" ]; then
-		echo "Failed to acquire write permission for config file: $CONFIG_PATH"
+	if [ ! -r "$CONFIG_PATH" ] || [ ! -w "$CONFIG_PATH" ]; then
+		echo "Failed to acquire read/write permission for config file: $CONFIG_PATH"
 		exit 1
 	fi
 
-	echo "Permission fixed for config file: $CONFIG_PATH"
+	echo "Permission fixed for config file: $CONFIG_PATH (read/write)"
 }
 
 if [ ! -d "$CONFIG_DIR" ]; then
 	mkdir -p "$CONFIG_DIR" 2>/dev/null || true
 fi
 
-ensure_config_writable
+ensure_config_access
 
 mkdir -p "$(dirname "$BIN_PATH")"
 curl -sL "${BASE_URL}/sub-magic.sh" -o "$BIN_PATH"
@@ -97,5 +97,4 @@ TIMER
 
 systemctl --user daemon-reload
 systemctl --user enable --now sub-magic.timer
-$BIN_PATH
 echo "Installed: timer=$INTERVAL, controller=auto(from config), config=$CONFIG_PATH"
