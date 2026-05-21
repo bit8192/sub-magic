@@ -68,7 +68,11 @@ export async function renderDashboard(container) {
 		</div>
 		<div class="card">
 			<h2>Linux 安装</h2>
-			<p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">在 Linux 服务器执行以下命令自动安装，使用 systemd 定时器配合 ETag 长轮询持续等待配置变化；无更新时请求会在一轮长轮询结束后再次发起，而不是简单固定每 30 秒拉取一次。用户级服务适合配置文件由当前用户可读写的常规部署；root 系统服务适合发行版将 Mihomo 运行目录隔离到 <code>/var/lib/mihomo</code> 的场景。</p>
+			<p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">
+			在 Linux 服务器执行以下命令自动安装，使用 systemd 定时器配合 ETag 长轮询持续30秒等待配置变化并更新配置。<br/>
+			用户级服务: 适合配置文件由当前用户可读写的常规部署。<br/>
+			root系统服务: 适合发行版将 Mihomo 运行目录隔离到 <code>/var/lib/mihomo</code> 的场景。
+			</p>
 			<div class="script-config">
 				<div class="script-field script-field-mode">
 					<label>安装模式</label>
