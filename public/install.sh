@@ -12,11 +12,54 @@ echo "Config path: $CONFIG_PATH"
 echo "Interval:   $INTERVAL"
 
 CONFIG_DIR=$(dirname "$CONFIG_PATH")
-if [ ! -w "$CONFIG_DIR" ]; then
+
+ensure_config_writable() {
+	local current_group=""
+
+	if [ -w "$CONFIG_PATH" ]; then
+		return 0
+	fi
+
+	if [ ! -e "$CONFIG_PATH" ]; then
+		if [ -w "$CONFIG_DIR" ]; then
+			return 0
+		fi
+
+		if ! command -v sudo >/dev/null 2>&1; then
+			echo "Cannot write config: $CONFIG_PATH"
+			echo "Directory is not writable and sudo is not available: $CONFIG_DIR"
+			exit 1
+		fi
+
+		sudo mkdir -p "$CONFIG_DIR"
+		sudo chown root:"$(id -gn)" "$CONFIG_DIR"
+		sudo chmod g+w "$CONFIG_DIR"
+		echo "Permission fixed for config directory: $CONFIG_DIR"
+		return 0
+	fi
+
+	if ! command -v sudo >/dev/null 2>&1; then
+		echo "Cannot write config file and sudo is not available: $CONFIG_PATH"
+		exit 1
+	fi
+
+	current_group="$(id -gn)"
+	sudo chgrp "$current_group" "$CONFIG_PATH"
+	sudo chmod g+w "$CONFIG_PATH"
+
+	if [ ! -w "$CONFIG_PATH" ]; then
+		echo "Failed to acquire write permission for config file: $CONFIG_PATH"
+		exit 1
+	fi
+
+	echo "Permission fixed for config file: $CONFIG_PATH"
+}
+
+if [ ! -d "$CONFIG_DIR" ]; then
 	mkdir -p "$CONFIG_DIR" 2>/dev/null || true
-	chmod u+w "$CONFIG_DIR" 2>/dev/null || true
-	echo "Permission fixed: $CONFIG_DIR"
 fi
+
+ensure_config_writable
 
 mkdir -p "$(dirname "$BIN_PATH")"
 mkdir -p "$(dirname "$CONF_FILE")"
