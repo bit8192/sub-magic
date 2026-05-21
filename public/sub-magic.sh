@@ -10,6 +10,55 @@ cleanup() {
 	rm -f "$HEADERS_FILE" "$TEMP_FILE"
 }
 
+get_runtime_config_path() {
+	local pid cmdline_path arg next_is_dir dir
+
+	pid=$(pgrep -x mihomo 2>/dev/null | head -n 1 || true)
+	[ -n "$pid" ] || return 1
+
+	cmdline_path="/proc/$pid/cmdline"
+	[ -r "$cmdline_path" ] || return 1
+
+	next_is_dir=0
+	while IFS= read -r -d '' arg; do
+		if [ "$next_is_dir" = "1" ]; then
+			dir="$arg"
+			next_is_dir=0
+			break
+		fi
+
+		case "$arg" in
+			-d)
+				next_is_dir=1
+				;;
+			-d*)
+				dir="${arg#-d}"
+				break
+				;;
+		esac
+	done < "$cmdline_path"
+
+	[ -n "$dir" ] || return 1
+	printf '%s/config.yaml\n' "${dir%/}"
+}
+
+sync_runtime_config() {
+	local runtime_config_path=""
+
+	runtime_config_path=$(get_runtime_config_path || true)
+	[ -n "$runtime_config_path" ] || return 0
+
+	if [ "$runtime_config_path" = "$CONFIG_PATH" ]; then
+		return 0
+	fi
+
+	if cp "$TEMP_FILE" "$runtime_config_path" 2>/dev/null; then
+		echo "[$(date)] Runtime config updated: $runtime_config_path"
+	else
+		echo "[$(date)] Runtime config update skipped: $runtime_config_path" >&2
+	fi
+}
+
 trap cleanup EXIT
 
 mkdir -p "$(dirname "$ETAG_FILE")"
@@ -40,6 +89,7 @@ fi
 NEW_ETAG=$(grep -i '^etag:' "$HEADERS_FILE" | head -1 | sed 's/.*: *//' | tr -d '\r')
 cp "$TEMP_FILE" "$CONFIG_PATH"
 echo "[$(date)] Config updated: $CONFIG_PATH"
+sync_runtime_config
 [ -n "$NEW_ETAG" ] && echo "$NEW_ETAG" > "$ETAG_FILE"
 
 CONTROLLER=$(grep -m1 '^\s*external-controller:' "$CONFIG_PATH" | sed -E -e 's/^[[:space:]]*external-controller:[[:space:]]*//' -e "s/^['\"]//" -e "s/['\"]$//")
@@ -47,17 +97,17 @@ SECRET=$(grep -m1 '^\s*secret:' "$CONFIG_PATH" | sed -E -e 's/^[[:space:]]*secre
 
 if [ -n "$CONTROLLER" ]; then
 	if [ -n "$SECRET" ]; then
-		if curl -sS -X PUT "http://${CONTROLLER}/configs?force=true" -H "Authorization: Bearer ${SECRET}" -o /dev/null 2>/dev/null; then
+		if curl -sS -X PUT "http://${CONTROLLER}/configs?force=true" -H "Authorization: Bearer ${SECRET}" -H "Content-Type: application/json" --data '{"path":"","payload":""}' -o /dev/null 2>/dev/null; then
 			echo "[$(date)] Mihomo reloaded via API: $CONTROLLER"
 		else
-			echo "[$(date)] API reload failed, falling back to restart" >&2
+			echo "[$(date)] API reload failed, falling back to service restart" >&2
 			systemctl --user restart mihomo 2>/dev/null || systemctl restart mihomo 2>/dev/null || service mihomo restart 2>/dev/null || true
 		fi
 	else
-		if curl -sS -X PUT "http://${CONTROLLER}/configs?force=true" -o /dev/null 2>/dev/null; then
+		if curl -sS -X PUT "http://${CONTROLLER}/configs?force=true" -H "Content-Type: application/json" --data '{"path":"","payload":""}' -o /dev/null 2>/dev/null; then
 			echo "[$(date)] Mihomo reloaded via API: $CONTROLLER"
 		else
-			echo "[$(date)] API reload failed, falling back to restart" >&2
+			echo "[$(date)] API reload failed, falling back to service restart" >&2
 			systemctl --user restart mihomo 2>/dev/null || systemctl restart mihomo 2>/dev/null || service mihomo restart 2>/dev/null || true
 		fi
 	fi
