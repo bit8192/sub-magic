@@ -68,15 +68,26 @@ export async function renderDashboard(container) {
 		</div>
 		<div class="card">
 			<h2>Linux 安装</h2>
-			<p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">在 Linux 服务器执行以下命令自动安装，使用 systemd 用户级服务 + ETag 轮询，每 30 秒检查一次更新</p>
+			<p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">在 Linux 服务器执行以下命令自动安装，使用 systemd 定时器配合 ETag 长轮询持续等待配置变化；无更新时请求会在一轮长轮询结束后再次发起，而不是简单固定每 30 秒拉取一次。用户级服务适合配置文件由当前用户可读写的常规部署；root 系统服务适合发行版将 Mihomo 运行目录隔离到 <code>/var/lib/mihomo</code> 的场景。</p>
 			<div class="script-config">
-				<div class="script-field">
+				<div class="script-field script-field-mode">
+					<label>安装模式</label>
+					<select id="script-install-mode" onchange="generateAutoScript()">
+						<option value="user">用户级服务</option>
+						<option value="root">root 系统服务</option>
+					</select>
+				</div>
+				<div class="script-field script-field-path">
 					<label>配置文件路径</label>
 					<input type="text" id="script-config-path" value="/etc/mihomo/config.yaml" onchange="generateAutoScript()" />
 				</div>
 			</div>
+			<label class="script-label">安装命令</label>
 			<pre id="auto-update-script" class="script-block"></pre>
-			<button class="btn-primary" onclick="copyAutoScript()">复制命令</button>
+			<button class="btn-primary script-copy-btn" onclick="copyAutoScript()">复制命令</button>
+			<label class="script-label">卸载命令</label>
+			<pre id="auto-uninstall-script" class="script-block"></pre>
+			<button class="btn-warning" onclick="copyUninstallScript()">复制卸载命令</button>
 		</div>`
 
 	window._subUrl = subUrl
@@ -84,17 +95,33 @@ export async function renderDashboard(container) {
 }
 
 export function generateAutoScript() {
+	const installMode = document.getElementById('script-install-mode')?.value || 'user'
 	const configPath = document.getElementById('script-config-path')?.value || '/etc/mihomo/config.yaml'
 	const subUrl = window._subUrl || ''
-	const cmd = `curl -sL ${location.origin}/install.sh | bash -s -- "${configPath}" "${subUrl}"`
-	const pre = document.getElementById('auto-update-script')
-	if (pre) pre.textContent = cmd
+	const isRoot = installMode === 'root'
+	const installCmd = isRoot
+		? `curl -sL ${location.origin}/install-root.sh | sudo bash -s -- "${configPath}" "${subUrl}"`
+		: `curl -sL ${location.origin}/install.sh | bash -s -- "${configPath}" "${subUrl}"`
+	const uninstallCmd = isRoot
+		? 'sudo systemctl disable --now sub-magic.timer && sudo rm -f /etc/systemd/system/sub-magic.service /etc/systemd/system/sub-magic.timer /usr/local/bin/sub-magic && sudo systemctl daemon-reload'
+		: 'systemctl --user disable --now sub-magic.timer && rm -f ~/.config/systemd/user/sub-magic.service ~/.config/systemd/user/sub-magic.timer ~/.local/bin/sub-magic && systemctl --user daemon-reload'
+	const installPre = document.getElementById('auto-update-script')
+	const uninstallPre = document.getElementById('auto-uninstall-script')
+	if (installPre) installPre.textContent = installCmd
+	if (uninstallPre) uninstallPre.textContent = uninstallCmd
 }
 
 export function copyAutoScript() {
 	const pre = document.getElementById('auto-update-script')
 	if (pre) {
 		navigator.clipboard.writeText(pre.textContent).then(() => toast('命令已复制', 'success'))
+	}
+}
+
+export function copyUninstallScript() {
+	const pre = document.getElementById('auto-uninstall-script')
+	if (pre) {
+		navigator.clipboard.writeText(pre.textContent).then(() => toast('卸载命令已复制', 'success'))
 	}
 }
 
