@@ -68,15 +68,11 @@ export async function renderDashboard(container) {
 		</div>
 		<div class="card">
 			<h2>Linux 安装</h2>
-			<p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">在 Linux 服务器执行以下命令自动安装，使用 systemd 用户级服务 + ETag 轮询</p>
+			<p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">在 Linux 服务器执行以下命令自动安装，使用 systemd 用户级服务 + ETag 轮询，每 30 秒检查一次更新</p>
 			<div class="script-config">
 				<div class="script-field">
 					<label>配置文件路径</label>
 					<input type="text" id="script-config-path" value="/etc/mihomo/config.yaml" onchange="generateAutoScript()" />
-				</div>
-				<div class="script-field">
-					<label>定时间隔</label>
-					<input type="text" id="script-interval" value="5m" onchange="generateAutoScript()" style="width:80px" />
 				</div>
 			</div>
 			<pre id="auto-update-script" class="script-block"></pre>
@@ -89,9 +85,8 @@ export async function renderDashboard(container) {
 
 export function generateAutoScript() {
 	const configPath = document.getElementById('script-config-path')?.value || '/etc/mihomo/config.yaml'
-	const interval = document.getElementById('script-interval')?.value || '5m'
 	const subUrl = window._subUrl || ''
-	const cmd = `curl -sL ${location.origin}/install.sh | bash -s -- "${configPath}" "${subUrl}" "${interval}"`
+	const cmd = `curl -sL ${location.origin}/install.sh | bash -s -- "${configPath}" "${subUrl}"`
 	const pre = document.getElementById('auto-update-script')
 	if (pre) pre.textContent = cmd
 }

@@ -2,11 +2,17 @@
 set -e
 
 CONFIG_PATH="${1:-/etc/mihomo/config.yaml}"
-SUB_URL="${2:?Usage: $0 <config-path> <sub-url> [interval]}"
-INTERVAL="${3:-5m}"
-BIN_PATH="${4:-$HOME/.local/bin/sub-magic}"
+SUB_URL="${2:?Usage: $0 <config-path> <sub-url> [bin-path]}"
+INTERVAL="30s"
+LEGACY_ARG3="${3:-}"
+if [ -n "${4:-}" ]; then
+	BIN_PATH="$4"
+elif [[ "$LEGACY_ARG3" == */* ]]; then
+	BIN_PATH="$LEGACY_ARG3"
+else
+	BIN_PATH="$HOME/.local/bin/sub-magic"
+fi
 BASE_URL="${SUB_URL%/sub/*}"
-CONF_FILE="$HOME/.config/sub-magic.conf"
 
 echo "Config path: $CONFIG_PATH"
 echo "Interval:   $INTERVAL"
@@ -62,15 +68,10 @@ fi
 ensure_config_writable
 
 mkdir -p "$(dirname "$BIN_PATH")"
-mkdir -p "$(dirname "$CONF_FILE")"
 curl -sL "${BASE_URL}/sub-magic.sh" -o "$BIN_PATH"
 sed -i "s|__CONFIG_PATH__|${CONFIG_PATH}|g" "$BIN_PATH"
 sed -i "s|__SUB_URL__|${SUB_URL}|g" "$BIN_PATH"
 chmod +x "$BIN_PATH"
-
-cat > "$CONF_FILE" << CONF
-INTERVAL="$INTERVAL"
-CONF
 
 mkdir -p ~/.config/systemd/user
 cat > ~/.config/systemd/user/sub-magic.service << SVC
@@ -88,8 +89,7 @@ Description=Sub Magic config update timer
 
 [Timer]
 OnUnitActiveSec=$INTERVAL
-OnBootSec=1m
-RandomizedDelaySec=30
+OnBootSec=$INTERVAL
 
 [Install]
 WantedBy=timers.target

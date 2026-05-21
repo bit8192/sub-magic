@@ -123,6 +123,25 @@ https://your-worker.example.com/sub/{key}
 
 可直接填入 Mihomo / Clash Meta 客户端。
 
+订阅接口支持标准 `ETag / If-None-Match` 条件请求：
+
+- 普通客户端请求 `/sub/{key}` 时，Worker 会立即返回结果。
+- 配置未变化时返回 `304 Not Modified`。
+- 配置有变化时返回 `200` 和最新 YAML 内容。
+
+### Linux 自动更新
+
+首页提供 Linux 安装命令，会安装一个 systemd 用户级定时器与更新脚本。
+
+- 定时器固定每 `30s` 触发一次。
+- 更新脚本请求订阅时会携带 `If-None-Match` 和专用请求头 `X-Sub-Magic-Long-Poll: 1`。
+- Worker 仅对带该请求头的请求启用 KV 伪长轮询。
+- 当客户端 `ETag` 与当前配置一致时，Worker 会每 `3s` 检查一次 KV，最多检查 `10` 次，总等待约 `30s`。
+- 在等待期间如果检测到配置变化，会立即返回 `200` 和最新 YAML。
+- 如果等待结束仍无变化，则返回 `304`，客户端在下一次定时触发时继续请求。
+
+这种实现依赖 Cloudflare KV 读取来近似长轮询，适合个人使用场景；如果后续需要更稳定的“更新即返回”语义，可再迁移到 Durable Objects。
+
 ### 规则快速写入 API
 
 除后台外，服务还提供两个给浏览器扩展使用的接口：

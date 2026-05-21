@@ -1,8 +1,9 @@
-import { getConfig, getParsedConfig } from './config'
-import { parseConfig, serializeConfig, type ClashConfig } from './yaml'
+import { getConfig } from './config'
+import { parseConfig, serializeConfig } from './yaml'
 
-let lastConfigEtag: string | null = null
-let lastConfigBody: string | null = null
+const LONG_POLL_HEADER = 'X-Sub-Magic-Long-Poll'
+const LONG_POLL_INTERVAL_MS = 3000
+const LONG_POLL_MAX_CHECKS = 10
 
 function computeEtag(text: string): string {
   let hash = 0
@@ -14,16 +15,53 @@ function computeEtag(text: string): string {
   return `"${Math.abs(hash).toString(36)}"`
 }
 
-export async function generateSubscription(env: Env, request: Request): Promise<Response> {
+function isLongPollRequest(request: Request): boolean {
+  return request.headers.get(LONG_POLL_HEADER) === '1'
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function getSubscriptionSnapshot(env: Env): Promise<{ rawConfig: string | null, etag: string | null }> {
   const rawConfig = await getConfig(env)
   if (!rawConfig) {
+    return { rawConfig: null, etag: null }
+  }
+  return { rawConfig, etag: computeEtag(rawConfig) }
+}
+
+export async function generateSubscription(env: Env, request: Request): Promise<Response> {
+  let { rawConfig, etag } = await getSubscriptionSnapshot(env)
+  if (!rawConfig || !etag) {
     return new Response('Configuration not found', { status: 404 })
   }
 
-  const etag = computeEtag(rawConfig)
+  const clientEtag = request.headers.get('If-None-Match')
 
-  if (request.headers.get('If-None-Match') === etag) {
-    return new Response(null, { status: 304 })
+  if (clientEtag === etag && isLongPollRequest(request)) {
+    for (let i = 0; i < LONG_POLL_MAX_CHECKS; i++) {
+      await sleep(LONG_POLL_INTERVAL_MS)
+      const snapshot = await getSubscriptionSnapshot(env)
+      rawConfig = snapshot.rawConfig
+      etag = snapshot.etag
+      if (!rawConfig || !etag) {
+        return new Response('Configuration not found', { status: 404 })
+      }
+      if (etag !== clientEtag) {
+        break
+      }
+    }
+  }
+
+  if (clientEtag === etag) {
+    return new Response(null, {
+      status: 304,
+      headers: {
+        'ETag': etag,
+        'Cache-Control': 'no-cache',
+      },
+    })
   }
 
   const config = parseConfig(rawConfig)

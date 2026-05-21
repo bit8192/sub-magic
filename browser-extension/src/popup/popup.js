@@ -1,4 +1,4 @@
-import { parseRuleDisplay, findRuleByConnection, addRuleLocal, addRuleRemote, updateRuleRemote, deleteRule } from '../utils/api.js'
+import { parseRuleDisplay, findRuleByConnection, addRuleLocal, addRuleRemote, updateRuleRemote, waitForRuleUpdate, waitForRulePresent, deleteRule } from '../utils/api.js'
 
 const state = {
 	domain: '',
@@ -356,14 +356,24 @@ async function handleAddRule() {
 		if (hasRemote) {
 			try {
 				await addRuleRemote(state.subMagic.url, state.subMagic.accessKey, ruleStr)
-				messages.push('远程添加成功')
+				if (hasLocal) {
+					resultEl.innerHTML = '<span class="spinner"></span>远程添加成功，等待本地 Mihomo 生效...'
+					const verifyResult = await waitForRulePresent(state.mihomo.url, state.mihomo.secret, ruleStr)
+					if (verifyResult.ok) {
+						messages.push(`远程添加成功，本地 Mihomo 已生效（${verifyResult.attempts}s）`)
+					} else {
+						messages.push('远程添加成功，但本地 Mihomo 在 30 秒内未检测到规则生效，请手动检查订阅更新状态')
+					}
+				} else {
+					messages.push('远程添加成功')
+				}
 			} catch (e) {
 				messages.push(`远程添加失败: ${e.message}`)
 			}
 		}
 
 		resultEl.textContent = messages.join('\n')
-		resultEl.className = 'result-box success'
+		resultEl.className = messages.some(message => message.includes('失败') || message.includes('未检测到')) ? 'result-box error' : 'result-box success'
 	} catch (e) {
 		resultEl.textContent = `操作失败: ${e.message}`
 		resultEl.className = 'result-box error'
@@ -410,6 +420,20 @@ async function handleSaveRule() {
 
 	try {
 		await updateRuleRemote(state.subMagic.url, state.subMagic.accessKey, state.editingRule, newRuleStr)
+		if (hasLocal) {
+			resultEl.innerHTML = '<span class="spinner"></span>远程修改成功，等待本地 Mihomo 生效...'
+			const verifyResult = await waitForRuleUpdate(state.mihomo.url, state.mihomo.secret, state.editingRule, newRuleStr)
+			state.editingRule = newRuleStr
+			if (verifyResult.ok) {
+				resultEl.textContent = `远程修改成功，本地 Mihomo 已生效（${verifyResult.attempts}s）`
+				resultEl.className = 'result-box success'
+			} else {
+				resultEl.textContent = '远程修改成功，但本地 Mihomo 在 30 秒内未检测到规则生效，请手动检查订阅更新状态'
+				resultEl.className = 'result-box error'
+			}
+			return
+		}
+
 		state.editingRule = newRuleStr
 		resultEl.textContent = '远程修改成功'
 		resultEl.className = 'result-box success'

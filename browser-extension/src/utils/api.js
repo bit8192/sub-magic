@@ -244,6 +244,36 @@ export async function updateRule(mihomoUrl, secret, oldRule, newRule) {
 	return { ok: true }
 }
 
+export async function waitForRuleUpdate(mihomoUrl, secret, oldRule, newRule, maxChecks = 30, intervalMs = 1000) {
+	for (let i = 0; i < maxChecks; i++) {
+		await new Promise(resolve => setTimeout(resolve, intervalMs))
+		const rulesRes = await mihomoFetch(mihomoUrl, secret, '/rules')
+		const currentRules = normalizeRules(rulesRes.rules)
+		const hasNewRule = currentRules.includes(newRule)
+		const hasOldRule = currentRules.includes(oldRule)
+
+		if (hasNewRule && !hasOldRule) {
+			return { ok: true, attempts: i + 1 }
+		}
+	}
+
+	return { ok: false, attempts: maxChecks }
+}
+
+export async function waitForRulePresent(mihomoUrl, secret, ruleStr, maxChecks = 30, intervalMs = 1000) {
+	for (let i = 0; i < maxChecks; i++) {
+		await new Promise(resolve => setTimeout(resolve, intervalMs))
+		const rulesRes = await mihomoFetch(mihomoUrl, secret, '/rules')
+		const currentRules = normalizeRules(rulesRes.rules)
+
+		if (currentRules.includes(ruleStr)) {
+			return { ok: true, attempts: i + 1 }
+		}
+	}
+
+	return { ok: false, attempts: maxChecks }
+}
+
 export async function deleteRule(mihomoUrl, secret, ruleStr) {
 	const rulesRes = await mihomoFetch(mihomoUrl, secret, '/rules')
 	const currentRules = normalizeRules(rulesRes.rules)
