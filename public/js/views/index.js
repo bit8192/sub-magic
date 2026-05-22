@@ -94,13 +94,19 @@ export async function renderDashboard(container) {
 			</div>
 		</div>
 		<div class="card">
-			<h2>Linux 安装</h2>
+			<h2>自动更新安装</h2>
 			<p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">
-			在 Linux 服务器执行以下命令自动安装，使用 systemd 定时器配合 ETag 长轮询持续30秒等待配置变化并更新配置。<br/>
-			用户级服务: 适合配置文件由当前用户可读写的常规部署。<br/>
-			root系统服务: 适合发行版将 Mihomo 运行目录隔离到 <code>/var/lib/mihomo</code> 的场景。
+			Linux 会安装 systemd 定时器，Windows 会安装计划任务，两者都使用 ETag 长轮询等待配置变化并自动更新配置。<br/>
+			Windows 安装脚本会先检测 Mihomo 服务；若未发现，会继续检查当前目录是否已有 Mihomo 可执行文件，并可按提示尝试下载最新 Windows 版本。
 			</p>
 			<div class="script-config">
+				<div class="script-field script-field-mode">
+					<label>平台</label>
+					<select id="script-platform" onchange="generateAutoScript()">
+						<option value="linux">Linux</option>
+						<option value="windows">Windows</option>
+					</select>
+				</div>
 				<div class="script-field script-field-mode">
 					<label>安装模式</label>
 					<select id="script-install-mode" onchange="generateAutoScript()">
@@ -126,20 +132,44 @@ export async function renderDashboard(container) {
 }
 
 export function generateAutoScript() {
+	const platform = document.getElementById('script-platform')?.value || 'linux'
 	const installMode = document.getElementById('script-install-mode')?.value || 'user'
-	const configPath = document.getElementById('script-config-path')?.value || '/etc/mihomo/config.yaml'
+	const configInput = document.getElementById('script-config-path')
+	if (configInput) {
+		if (platform === 'windows' && configInput.value === '/etc/mihomo/config.yaml') {
+			configInput.value = '.\\config.yaml'
+		} else if (platform === 'linux' && configInput.value === '.\\config.yaml') {
+			configInput.value = '/etc/mihomo/config.yaml'
+		}
+	}
+	const configPath = configInput?.value || '/etc/mihomo/config.yaml'
 	const subUrl = window._subUrl || ''
+	const modeSelect = document.getElementById('script-install-mode')
 	const isRoot = installMode === 'root'
-	const installCmd = isRoot
-		? `curl -sL ${location.origin}/install-root.sh | sudo bash -s -- "${configPath}" "${subUrl}"`
-		: `curl -sL ${location.origin}/install.sh | bash -s -- "${configPath}" "${subUrl}"`
-	const uninstallCmd = isRoot
-		? 'sudo systemctl disable --now sub-magic.timer && sudo rm -f /etc/systemd/system/sub-magic.service /etc/systemd/system/sub-magic.timer /usr/local/bin/sub-magic && sudo systemctl daemon-reload'
-		: 'systemctl --user disable --now sub-magic.timer && rm -f ~/.config/systemd/user/sub-magic.service ~/.config/systemd/user/sub-magic.timer ~/.local/bin/sub-magic && systemctl --user daemon-reload'
+	let installCmd = ''
+	let uninstallCmd = ''
+
+	if (platform === 'windows') {
+		if (modeSelect) modeSelect.disabled = true
+		installCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "& { $tmp = Join-Path $env:TEMP 'sub-magic-install.ps1'; Invoke-WebRequest -UseBasicParsing '${location.origin}/install.ps1' -OutFile $tmp; & $tmp -ConfigPath '${toPwshSingleQuoted(configPath)}' -SubUrl '${toPwshSingleQuoted(subUrl)}' }"`
+		uninstallCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "Unregister-ScheduledTask -TaskName 'sub-magic' -Confirm:$false -ErrorAction SilentlyContinue; Remove-Item -LiteralPath '.\\sub-magic.ps1' -Force -ErrorAction SilentlyContinue"`
+	} else {
+		if (modeSelect) modeSelect.disabled = false
+		installCmd = isRoot
+			? `curl -sL ${location.origin}/install-root.sh | sudo bash -s -- "${configPath}" "${subUrl}"`
+			: `curl -sL ${location.origin}/install.sh | bash -s -- "${configPath}" "${subUrl}"`
+		uninstallCmd = isRoot
+			? 'sudo systemctl disable --now sub-magic.timer && sudo rm -f /etc/systemd/system/sub-magic.service /etc/systemd/system/sub-magic.timer /usr/local/bin/sub-magic && sudo systemctl daemon-reload'
+			: 'systemctl --user disable --now sub-magic.timer && rm -f ~/.config/systemd/user/sub-magic.service ~/.config/systemd/user/sub-magic.timer ~/.local/bin/sub-magic && systemctl --user daemon-reload'
+	}
 	const installPre = document.getElementById('auto-update-script')
 	const uninstallPre = document.getElementById('auto-uninstall-script')
 	if (installPre) installPre.textContent = installCmd
 	if (uninstallPre) uninstallPre.textContent = uninstallCmd
+}
+
+function toPwshSingleQuoted(value) {
+	return String(value || '').replaceAll("'", "''")
 }
 
 export function copyAutoScript() {

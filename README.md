@@ -143,6 +143,18 @@ https://your-worker.example.com/sub/{key}
 
 这种实现依赖 Cloudflare KV 读取来近似长轮询，适合个人使用场景；如果后续需要更稳定的“更新即返回”语义，可再迁移到 Durable Objects。
 
+### Windows 自动更新
+
+首页也提供 Windows 安装命令。安装脚本会在当前工作目录执行以下流程：
+
+- 检测系统中是否已存在 Mihomo 服务。
+- 如果不存在，再检查当前目录是否已有 `mihomo*.exe`。
+- 如果仍不存在，会询问是否尝试解析 `https://github.com/MetaCubeX/mihomo/releases` 的最新稳定版并下载适配当前架构的 Windows 压缩包，随后将 `mihomo.exe` 解压到当前目录。
+- 然后询问是否安装 Mihomo 服务。
+- 最后下载 `sub-magic.ps1` 到当前目录，并注册名为 `sub-magic` 的 Windows 计划任务，每 1 分钟执行一次更新脚本。
+
+Windows 更新脚本与 Linux 一样会携带 `If-None-Match` 和 `X-Sub-Magic-Long-Poll: 1`。当配置变更时，脚本会覆盖本地配置文件，并优先通过 `external-controller` 调用 Mihomo API 触发重载；若 API 不可用，则退回到重启 Mihomo 服务。
+
 ### 规则快速写入 API
 
 除后台外，服务还提供两个给浏览器扩展使用的接口：
