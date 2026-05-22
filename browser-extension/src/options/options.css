@@ -80,6 +80,25 @@ body {
 	border-color: var(--primary);
 }
 
+.checkbox-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	font-size: 14px;
+}
+
+.checkbox-row input {
+	width: 16px;
+	height: 16px;
+}
+
+.hint {
+	margin-top: 10px;
+	font-size: 12px;
+	color: var(--text-muted);
+	line-height: 1.5;
+}
+
 .input-with-toggle {
 	display: flex;
 	align-items: stretch;

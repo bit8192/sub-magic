@@ -17,9 +17,22 @@ export const RULE_TYPES = [
 ]
 
 const COMMON_RULE_TARGETS = ['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'GLOBAL']
+const PROXY_RULE_TYPES = ['http', 'https', 'socks4', 'socks5']
 
 let activeRuleFormIndex
 let pendingRuleDraft = null
+let ruleOptionMeta = { users: [], listeners: [] }
+
+async function ensureRuleOptionMeta() {
+  const [users, listeners] = await Promise.all([
+    API.get('/api/config/proxy-auth-users'),
+    API.get('/api/config/listeners'),
+  ])
+  ruleOptionMeta = {
+    users: Array.isArray(users) ? users : [],
+    listeners: Array.isArray(listeners) ? listeners : [],
+  }
+}
 
 export async function renderRules(container) {
   const data = await API.get('/api/config/rules')
@@ -114,7 +127,10 @@ export async function showRuleForm(index, draft = null) {
     }
   }
 
-  const allGroups = await API.get('/api/config/proxy-groups')
+  const [allGroups] = await Promise.all([
+    API.get('/api/config/proxy-groups'),
+    ensureRuleOptionMeta(),
+  ])
   const typeOptions = buildRuleTypeOptions(state.type)
   const targetOptions = [...new Set([...COMMON_RULE_TARGETS, ...allGroups.map(g => g.name), state.target].filter(Boolean))]
 
@@ -138,7 +154,7 @@ export async function showRuleForm(index, draft = null) {
 
     <div class="form-group" id="rf-payload-group">
       <label>Payload / 条件</label>
-      <textarea id="rf-payload" rows="3" placeholder="例如 google.com、CN、80、((DOMAIN,baidu.com),(NETWORK,UDP))">${esc(state.payload || '')}</textarea>
+      <div id="rf-payload-control"></div>
       <div class="form-help" id="rf-payload-help"></div>
       <div class="picker-row">
         <button id="geosite-btn" class="btn-sm btn-warning" onclick="openGeositePicker()" type="button">GeoSite</button>
@@ -166,7 +182,7 @@ export async function showRuleForm(index, draft = null) {
     </div>
   `)
 
-  ;['rf-type', 'rf-target', 'rf-payload', 'rf-noresolve', 'rf-src', 'rf-extra-params'].forEach(id => {
+  ;['rf-type', 'rf-target', 'rf-noresolve', 'rf-src', 'rf-extra-params'].forEach(id => {
     document.getElementById(id)?.addEventListener(id === 'rf-type' ? 'change' : 'input', updateRuleFormUI)
     if (id === 'rf-noresolve' || id === 'rf-src') document.getElementById(id)?.addEventListener('change', updateRuleFormUI)
   })
@@ -235,9 +251,62 @@ function splitRule(raw) {
   return parts
 }
 
+function getPayloadControlValue() {
+  const select = document.getElementById('rf-payload-select')
+  if (select) return select.value.trim()
+  const input = document.getElementById('rf-payload-input')
+  if (input) return input.value.trim()
+  return document.getElementById('rf-payload')?.value?.trim() || ''
+}
+
+function renderPayloadControl(type, value) {
+  const container = document.getElementById('rf-payload-control')
+  if (!container) return
+
+  if (type === 'IN-USER') {
+    const options = ['<option value=""></option>']
+      .concat(ruleOptionMeta.users.map(user => `<option value="${esc(user.username)}"${user.username === value ? ' selected' : ''}>${esc(user.username)}</option>`))
+    container.innerHTML = `<select id="rf-payload-select">${options.join('')}</select>`
+    container.querySelector('#rf-payload-select')?.addEventListener('change', updateRuleFormUI)
+    return
+  }
+
+  if (type === 'IN-TYPE') {
+    const options = ['<option value=""></option>']
+      .concat(PROXY_RULE_TYPES.map(item => `<option value="${item}"${item === value ? ' selected' : ''}>${item}</option>`))
+    container.innerHTML = `<select id="rf-payload-select">${options.join('')}</select>`
+    container.querySelector('#rf-payload-select')?.addEventListener('change', updateRuleFormUI)
+    return
+  }
+
+  if (type === 'IN-NAME') {
+    const options = ['<option value=""></option>']
+      .concat(ruleOptionMeta.listeners.map(listener => `<option value="${esc(listener.name)}"${listener.name === value ? ' selected' : ''}>${esc(listener.name)} · ${esc(listener.type || '')}</option>`))
+    container.innerHTML = `<select id="rf-payload-select">${options.join('')}</select>`
+    container.querySelector('#rf-payload-select')?.addEventListener('change', updateRuleFormUI)
+    return
+  }
+
+  if (type === 'IN-PORT') {
+    const datalistId = 'rf-payload-port-options'
+    const portOptions = [...new Set(ruleOptionMeta.listeners.map(listener => String(listener.port || '').trim()).filter(Boolean))]
+    container.innerHTML = `
+      <input id="rf-payload-input" list="${datalistId}" value="${esc(value || '')}" placeholder="例如 7890" />
+      <datalist id="${datalistId}">
+        ${portOptions.map(option => `<option value="${esc(option)}"></option>`).join('')}
+      </datalist>
+    `
+    container.querySelector('#rf-payload-input')?.addEventListener('input', updateRuleFormUI)
+    return
+  }
+
+  container.innerHTML = `<textarea id="rf-payload" rows="3" placeholder="例如 google.com、CN、80、((DOMAIN,baidu.com),(NETWORK,UDP))">${esc(value || '')}</textarea>`
+  container.querySelector('#rf-payload')?.addEventListener('input', updateRuleFormUI)
+}
+
 function buildRulePreview() {
   const type = document.getElementById('rf-type')?.value || ''
-  const payload = document.getElementById('rf-payload')?.value?.trim() || ''
+  const payload = getPayloadControlValue()
   const target = document.getElementById('rf-target')?.value?.trim() || ''
   const extras = new Set(
     (document.getElementById('rf-extra-params')?.value || '')
@@ -276,6 +345,14 @@ function getRuleTypeHint(type) {
       return 'payload 为国家/地区代码，如 CN、US。'
     case 'NETWORK':
       return 'payload 使用 tcp 或 udp。'
+    case 'IN-USER':
+      return 'payload 为代理授权用户，可从下拉中选择，也可留空表示未认证。'
+    case 'IN-TYPE':
+      return 'payload 为代理方式，可选 http / https / socks4 / socks5。'
+    case 'IN-NAME':
+      return 'payload 为 listener 名称，可从当前 listeners 配置中选择。'
+    case 'IN-PORT':
+      return 'payload 为入口端口，可直接填写，也可使用 listeners 端口建议。'
     default:
       return '按 Mihomo 规则语法填写 payload 和目标。'
   }
@@ -285,7 +362,7 @@ export function updateRuleFormUI() {
   const type = document.getElementById('rf-type')?.value || ''
   const payloadGroup = document.getElementById('rf-payload-group')
   const payloadHelp = document.getElementById('rf-payload-help')
-  const payload = document.getElementById('rf-payload')
+  const currentPayload = getPayloadControlValue()
   const targetLabel = document.getElementById('rf-target-label')
   const geositeBtn = document.getElementById('geosite-btn')
   const geoipBtn = document.getElementById('geoip-btn')
@@ -295,7 +372,9 @@ export function updateRuleFormUI() {
   const payloadOptional = type.toUpperCase() === 'MATCH'
   payloadGroup.style.display = ''
   payloadHelp.textContent = getRuleTypeHint(type)
-  payload.placeholder = type.toUpperCase() === 'MATCH' ? 'MATCH 可留空' : '例如 google.com、CN、80、((DOMAIN,baidu.com),(NETWORK,UDP))'
+  renderPayloadControl(type, currentPayload)
+  const payload = document.getElementById('rf-payload') || document.getElementById('rf-payload-input') || document.getElementById('rf-payload-select')
+  if (payload && type.toUpperCase() === 'MATCH' && 'placeholder' in payload) payload.placeholder = 'MATCH 可留空'
   targetLabel.textContent = type === 'SUB-RULE' ? '子规则名称' : '目标策略 / 代理组'
   geositeBtn.style.display = type === 'GEOSITE' ? 'inline-flex' : 'none'
   geoipBtn.style.display = type === 'GEOIP' ? 'inline-flex' : 'none'
@@ -306,7 +385,7 @@ export function updateRuleFormUI() {
     document.getElementById('rf-noresolve').checked = false
     document.getElementById('rf-src').checked = false
   }
-  if (payloadOptional && !payload.value.trim()) {
+  if (payloadOptional && payload && 'value' in payload && !payload.value.trim()) {
     payload.value = ''
   }
   document.getElementById('rf-preview').value = buildRulePreview()
@@ -319,7 +398,7 @@ function captureRuleDraft() {
   return {
     index: activeRuleFormIndex,
     type: document.getElementById('rf-type')?.value || 'GEOSITE',
-    payload: document.getElementById('rf-payload')?.value || '',
+    payload: getPayloadControlValue(),
     target: document.getElementById('rf-target')?.value || '',
     params: (document.getElementById('rf-extra-params')?.value || '').split(',').map(v => v.trim()).filter(Boolean),
     noResolve: !!document.getElementById('rf-noresolve')?.checked,
@@ -463,7 +542,7 @@ export async function saveRule(index) {
   const raw = buildRulePreview()
   const type = document.getElementById('rf-type').value.trim()
   const target = document.getElementById('rf-target').value.trim()
-  const payload = document.getElementById('rf-payload').value.trim()
+  const payload = getPayloadControlValue()
   if (!type) { toast('规则类型不能为空', 'error'); return }
   if (!target) { toast('目标策略不能为空', 'error'); return }
   if (type.toUpperCase() !== 'MATCH' && !payload) { toast('payload 不能为空', 'error'); return }

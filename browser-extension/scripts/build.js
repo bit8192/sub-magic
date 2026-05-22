@@ -18,6 +18,7 @@ copyDir(path.join(extDir, 'src'), path.join(distChrome, 'src'))
 copyDir(path.join(extDir, 'icons'), path.join(distChrome, 'icons'))
 const chromeManifest = { ...baseManifest }
 delete chromeManifest.browser_specific_settings
+chromeManifest.permissions = Array.from(new Set([...(chromeManifest.permissions || []), 'webRequestAuthProvider']))
 chromeManifest.icons = {
   16: 'icons/icon-16.png',
   48: 'icons/icon-48.png',
@@ -42,7 +43,9 @@ fs.writeFileSync(path.join(distChrome, 'manifest.json'), JSON.stringify(chromeMa
 
 copyDir(path.join(extDir, 'src'), path.join(distFirefox, 'src'))
 copyDir(path.join(extDir, 'icons'), path.join(distFirefox, 'icons'))
-fs.writeFileSync(path.join(distFirefox, 'manifest.json'), JSON.stringify(baseManifest, null, '\t'))
+const firefoxManifest = { ...baseManifest }
+firefoxManifest.permissions = Array.from(new Set([...(firefoxManifest.permissions || []), 'webRequestBlocking']))
+fs.writeFileSync(path.join(distFirefox, 'manifest.json'), JSON.stringify(firefoxManifest, null, '\t'))
 
 fs.mkdirSync(outDir, { recursive: true })
 

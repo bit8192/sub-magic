@@ -1,3 +1,11 @@
+const extensionBrowser = typeof browser !== 'undefined' ? browser : null
+const isFirefox = !!extensionBrowser?.proxy?.onRequest
+const supportsIsolation = isFirefox
+
+const PROXY_SYNC_KEYS = ['mihomoUrl', 'mihomoSecret', 'subMagicUrl', 'subMagicKey', 'proxyIsolation']
+const PROXY_LOCAL_KEYS = ['proxyGlobalState', 'proxyTabStates']
+const DEFAULT_PROXY_TYPE = 'http'
+
 let ws = null
 let config = { url: '', secret: '' }
 let reconnectDelay = 2000
@@ -16,6 +24,209 @@ const CORRELATION_WINDOW = 2000
 const MAX_REQUESTS_PER_TAB = 200
 const SHARED_SCORE_DELTA = 12
 const WINNING_SCORE_DELTA = 8
+
+const proxyState = {
+	isolationEnabled: supportsIsolation,
+	globalProfile: createDefaultProxyProfile(),
+	tabProfiles: {},
+}
+
+function createDefaultProxyProfile() {
+	return {
+		enabled: true,
+		proxyType: DEFAULT_PROXY_TYPE,
+		host: '',
+		port: 0,
+		listenerName: '',
+		source: 'config',
+		authUser: null,
+	}
+}
+
+function normalizeAuthUser(authUser) {
+	if (!authUser || typeof authUser !== 'object') return null
+	const username = String(authUser.username || '').trim()
+	const password = String(authUser.password || '')
+	return username ? { username, password } : null
+}
+
+function normalizeProfile(profile) {
+	const base = createDefaultProxyProfile()
+	if (!profile || typeof profile !== 'object') return base
+	return {
+		enabled: profile.enabled !== false,
+		proxyType: ['http', 'https', 'socks4', 'socks5'].includes(profile.proxyType) ? profile.proxyType : DEFAULT_PROXY_TYPE,
+		host: String(profile.host || '').trim(),
+		port: Number.isFinite(Number(profile.port)) ? Number(profile.port) : 0,
+		listenerName: String(profile.listenerName || '').trim(),
+		source: profile.source === 'listener' ? 'listener' : 'config',
+		authUser: normalizeAuthUser(profile.authUser),
+	}
+}
+
+function normalizeTabProfiles(tabProfiles) {
+	if (!tabProfiles || typeof tabProfiles !== 'object') return {}
+	const normalized = {}
+	for (const [tabId, profile] of Object.entries(tabProfiles)) {
+		if (!/^\d+$/.test(tabId)) continue
+		normalized[tabId] = normalizeProfile(profile)
+	}
+	return normalized
+}
+
+function canApplyProfile(profile) {
+	return !!(profile.enabled && profile.host && Number(profile.port) > 0)
+}
+
+function getBrowserInfo() {
+	return {
+		id: isFirefox ? 'firefox' : 'chrome',
+		supportsIsolation,
+	}
+}
+
+function getEffectiveProfile(tabId = 0) {
+	if (supportsIsolation && proxyState.isolationEnabled && tabId > 0) {
+		return normalizeProfile(proxyState.tabProfiles[String(tabId)] || proxyState.globalProfile)
+	}
+	return normalizeProfile(proxyState.globalProfile)
+}
+
+function serializeProxyState(tabId = 0) {
+	return {
+		browser: getBrowserInfo(),
+		isolationEnabled: proxyState.isolationEnabled,
+		profile: getEffectiveProfile(tabId),
+	}
+}
+
+async function persistProxyState() {
+	await chrome.storage.local.set({
+		proxyGlobalState: proxyState.globalProfile,
+		proxyTabStates: proxyState.tabProfiles,
+	})
+}
+
+async function loadProxyState() {
+	const syncData = await chrome.storage.sync.get(PROXY_SYNC_KEYS)
+	const localData = await chrome.storage.local.get(PROXY_LOCAL_KEYS)
+
+	proxyState.isolationEnabled = supportsIsolation ? syncData.proxyIsolation !== false : false
+	proxyState.globalProfile = normalizeProfile(localData.proxyGlobalState)
+	proxyState.tabProfiles = normalizeTabProfiles(localData.proxyTabStates)
+
+	if (!supportsIsolation && syncData.proxyIsolation !== false) {
+		await chrome.storage.sync.set({ proxyIsolation: false })
+	}
+	if (!localData.proxyGlobalState) {
+		await persistProxyState()
+	}
+
+	await applyProxySettings()
+}
+
+function buildChromeProxyConfig(profile) {
+	if (!canApplyProfile(profile)) {
+		return { mode: 'direct' }
+	}
+
+	return {
+		mode: 'fixed_servers',
+		rules: {
+			singleProxy: {
+				scheme: profile.proxyType,
+				host: profile.host,
+				port: Number(profile.port),
+			},
+		},
+	}
+}
+
+async function applyProxySettings() {
+	if (isFirefox || !chrome.proxy?.settings?.set) return
+	const profile = normalizeProfile(proxyState.globalProfile)
+	await chrome.proxy.settings.set({
+		value: buildChromeProxyConfig(profile),
+		scope: 'regular',
+	})
+}
+
+function buildFirefoxProxyInfo(profile, tabId) {
+	if (!canApplyProfile(profile)) {
+		return { type: 'direct' }
+	}
+
+	const info = {
+		type: profile.proxyType === 'socks5' ? 'socks' : profile.proxyType,
+		host: profile.host,
+		port: Number(profile.port),
+		connectionIsolationKey: proxyState.isolationEnabled && tabId > 0 ? `tab:${tabId}` : 'global',
+	}
+
+	if (profile.proxyType === 'socks5') {
+		info.proxyDNS = true
+		if (profile.authUser) {
+			info.username = profile.authUser.username
+			info.password = profile.authUser.password
+		}
+	}
+
+	if (profile.proxyType === 'socks4') {
+		info.proxyDNS = true
+	}
+
+	return info
+}
+
+function handleFirefoxProxyRequest(requestInfo) {
+	const profile = getEffectiveProfile(requestInfo.tabId || 0)
+	return buildFirefoxProxyInfo(profile, requestInfo.tabId || 0)
+}
+
+function resolveProxyAuthCredentials(details) {
+	if (!details.isProxy) return null
+	const profile = getEffectiveProfile(details.tabId || 0)
+	if (!canApplyProfile(profile) || !profile.authUser) return null
+	if (profile.proxyType !== 'http' && profile.proxyType !== 'https') return null
+	return {
+		authCredentials: {
+			username: profile.authUser.username,
+			password: profile.authUser.password,
+		},
+	}
+}
+
+function registerProxyAuthHandler() {
+	const filter = { urls: ['<all_urls>'] }
+
+	if (isFirefox && extensionBrowser?.webRequest?.onAuthRequired) {
+		extensionBrowser.webRequest.onAuthRequired.addListener(
+			(details) => resolveProxyAuthCredentials(details),
+			filter,
+			['blocking']
+		)
+		return
+	}
+
+	if (chrome.webRequest?.onAuthRequired) {
+		chrome.webRequest.onAuthRequired.addListener(
+			(details, callback) => {
+				callback(resolveProxyAuthCredentials(details))
+			},
+			filter,
+			['asyncBlocking']
+		)
+	}
+}
+
+if (isFirefox && extensionBrowser?.proxy?.onRequest) {
+	extensionBrowser.proxy.onRequest.addListener(
+		handleFirefoxProxyRequest,
+		{ urls: ['<all_urls>'] }
+	)
+}
+
+registerProxyAuthHandler()
 
 function extractHost(url) {
 	try { return normalizeHost(new URL(url).hostname) } catch { return '' }
@@ -47,7 +258,7 @@ function extractRequestInfo(url) {
 }
 
 function httpToWs(url) {
-	let base = url.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+	const base = url.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '')
 	return `ws://${base}`
 }
 
@@ -162,6 +373,10 @@ chrome.webRequest.onBeforeRequest.addListener(
 
 chrome.tabs.onRemoved.addListener((tabId) => {
 	tabRequests.delete(tabId)
+	if (proxyState.tabProfiles[String(tabId)]) {
+		delete proxyState.tabProfiles[String(tabId)]
+		persistProxyState().catch(() => {})
+	}
 })
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
@@ -270,7 +485,7 @@ function getMergedGroups(tabId) {
 	})
 
 	return {
-		total: groups.reduce((s, g) => s + g.count, 0),
+		total: groups.reduce((sum, group) => sum + group.count, 0),
 		groups,
 		status: 'connected',
 	}
@@ -280,8 +495,8 @@ async function getProxyGroups() {
 	const data = await mihomoFetch(config.url, config.secret, '/proxies')
 	const proxies = data.proxies || {}
 	return Object.values(proxies)
-		.filter(p => p?.name && p.type && p.type !== 'Direct' && p.type !== 'Reject')
-		.map(p => ({ name: p.name, type: p.type, now: p.now || '' }))
+		.filter(proxy => proxy?.name && proxy.type && proxy.type !== 'Direct' && proxy.type !== 'Reject')
+		.map(proxy => ({ name: proxy.name, type: proxy.type, now: proxy.now || '' }))
 }
 
 function connectWs() {
@@ -289,7 +504,7 @@ function connectWs() {
 	if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return
 
 	const token = config.secret ? `?token=${encodeURIComponent(config.secret)}` : ''
-	let wsUrl = `${httpToWs(config.url)}/connections?interval=2000${config.secret ? token.replace('?', '&') : ''}`
+	const wsUrl = `${httpToWs(config.url)}/connections?interval=2000${config.secret ? token.replace('?', '&') : ''}`
 
 	try {
 		ws = new WebSocket(wsUrl)
@@ -302,20 +517,33 @@ function connectWs() {
 			try {
 				const data = JSON.parse(event.data)
 				addSnapshot(data)
-			} catch (e) {}
+			} catch {}
 		}
 
 		ws.onclose = () => {
 			ws = null
-			if (!polling) { polling = true; startPolling() }
+			if (!polling) {
+				polling = true
+				startPolling()
+			}
 		}
 
 		ws.onerror = () => {
-			if (ws) { ws.onclose = null; ws.close(); ws = null }
-			if (!polling) { polling = true; startPolling() }
+			if (ws) {
+				ws.onclose = null
+				ws.close()
+				ws = null
+			}
+			if (!polling) {
+				polling = true
+				startPolling()
+			}
 		}
-	} catch (e) {
-		if (!polling) { polling = true; startPolling() }
+	} catch {
+		if (!polling) {
+			polling = true
+			startPolling()
+		}
 	}
 }
 
@@ -324,7 +552,7 @@ async function pollHttp() {
 	try {
 		const data = await mihomoFetch(config.url, config.secret, '/connections')
 		addSnapshot(data)
-	} catch (e) {}
+	} catch {}
 }
 
 function startPolling() {
@@ -342,10 +570,16 @@ function initMonitor() {
 	polling = false
 
 	if (ws) {
-		try { ws.onclose = null; ws.close() } catch (e) {}
+		try {
+			ws.onclose = null
+			ws.close()
+		} catch {}
 		ws = null
 	}
-	if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+	if (reconnectTimer) {
+		clearTimeout(reconnectTimer)
+		reconnectTimer = null
+	}
 	stopPolling()
 
 	connectWs()
@@ -360,24 +594,33 @@ async function loadConfig() {
 async function ensureProxyGroups() {
 	if (proxyGroups.length > 0 || !config.url) return
 	try {
-		const groups = await getProxyGroups()
-		proxyGroups = groups
-	} catch (e) {
+		proxyGroups = await getProxyGroups()
+	} catch {
 		proxyGroups = []
 	}
 }
 
+async function ensureSyncDefaults() {
+	const data = await chrome.storage.sync.get(PROXY_SYNC_KEYS)
+	const updates = {}
+	if (data.mihomoUrl === undefined) updates.mihomoUrl = ''
+	if (data.mihomoSecret === undefined) updates.mihomoSecret = ''
+	if (data.subMagicUrl === undefined) updates.subMagicUrl = ''
+	if (data.subMagicKey === undefined) updates.subMagicKey = ''
+	if (data.proxyIsolation === undefined) updates.proxyIsolation = supportsIsolation
+	if (Object.keys(updates).length > 0) {
+		await chrome.storage.sync.set(updates)
+	}
+}
+
 chrome.runtime.onInstalled.addListener(() => {
-	chrome.storage.sync.get(['mihomoUrl', 'mihomoSecret', 'subMagicUrl', 'subMagicKey'], data => {
-		if (!data.mihomoUrl) chrome.storage.sync.set({ mihomoUrl: '' })
-		if (!data.mihomoSecret) chrome.storage.sync.set({ mihomoSecret: '' })
-		if (!data.subMagicUrl) chrome.storage.sync.set({ subMagicUrl: '' })
-		if (!data.subMagicKey) chrome.storage.sync.set({ subMagicKey: '' })
-	})
+	ensureSyncDefaults().catch(() => {})
 })
 
 ;(async () => {
+	await ensureSyncDefaults()
 	await loadConfig()
+	await loadProxyState()
 	if (config.url) {
 		initMonitor()
 		ensureProxyGroups()
@@ -385,11 +628,22 @@ chrome.runtime.onInstalled.addListener(() => {
 })()
 
 chrome.storage.onChanged.addListener((changes, area) => {
-	if (area !== 'sync') return
-	if (changes.mihomoUrl || changes.mihomoSecret) {
+	if (area === 'sync' && (changes.mihomoUrl || changes.mihomoSecret)) {
 		loadConfig().then(() => {
-			if (config.url) initMonitor()
+			if (config.url) {
+				initMonitor()
+			} else {
+				stopPolling()
+			}
 		})
+	}
+
+	if (area === 'sync' && changes.proxyIsolation) {
+		loadProxyState().catch(() => {})
+	}
+
+	if (area === 'local' && (changes.proxyGlobalState || changes.proxyTabStates)) {
+		loadProxyState().catch(() => {})
 	}
 })
 
@@ -413,15 +667,40 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 			sendResponse({ data, proxyGroups })
 		})()
 		return true
-	} else if (msg.type === 'POLL_STOP') {
+	}
+
+	if (msg.type === 'POLL_STOP') {
 		sendResponse({ ok: true })
 		return false
-	} else if (msg.type === 'REFRESH_PROXY') {
+	}
+
+	if (msg.type === 'REFRESH_PROXY') {
 		;(async () => {
 			await loadConfig()
 			proxyGroups = []
 			await ensureProxyGroups()
 			sendResponse({ proxyGroups })
+		})()
+		return true
+	}
+
+	if (msg.type === 'PROXY_GET_STATE') {
+		sendResponse(serializeProxyState(msg.tabId || 0))
+		return false
+	}
+
+	if (msg.type === 'PROXY_SET_STATE') {
+		;(async () => {
+			const tabId = Number(msg.tabId || 0)
+			const profile = normalizeProfile(msg.profile)
+			if (supportsIsolation && proxyState.isolationEnabled && tabId > 0) {
+				proxyState.tabProfiles[String(tabId)] = profile
+			} else {
+				proxyState.globalProfile = profile
+			}
+			await persistProxyState()
+			await applyProxySettings()
+			sendResponse(serializeProxyState(tabId))
 		})()
 		return true
 	}

@@ -8,7 +8,7 @@ import {
   restoreConfigVersion, deleteConfigVersion,
 } from './config'
 import {
-  parseConfig, serializeConfig, parseRule, type ProxyGroup, type ProxyProvider,
+  parseConfig, serializeConfig, parseRule, type Listener, type ProxyAuthUser, type ProxyGroup, type ProxyProvider,
 } from './yaml'
 import {
   verifyPassword,
@@ -72,6 +72,65 @@ function corsPreflight(request: Request): Response {
       Vary: 'Origin',
     },
   })
+}
+
+async function requireAuthOrAccessKey(request: Request, env: Env): Promise<Response | null> {
+  const accessErr = await requireAccessKey(request, env)
+  if (!accessErr) return null
+
+  const sessionErr = await requireAuth(request, env)
+  if (!sessionErr) return null
+
+  return accessErr
+}
+
+function parseProxyAuthEntry(entry: unknown): ProxyAuthUser | null {
+  if (typeof entry !== 'string') return null
+  const separatorIdx = entry.indexOf(':')
+  if (separatorIdx <= 0) return null
+  return {
+    username: entry.slice(0, separatorIdx),
+    password: entry.slice(separatorIdx + 1),
+  }
+}
+
+function serializeProxyAuthEntry(user: ProxyAuthUser): string {
+  return `${user.username}:${user.password}`
+}
+
+function getProxyAuthUsers(config: Record<string, unknown>): ProxyAuthUser[] {
+  return Array.isArray(config.authentication)
+    ? config.authentication.map(parseProxyAuthEntry).filter((entry): entry is ProxyAuthUser => !!entry)
+    : []
+}
+
+function normalizeListener(body: Record<string, unknown>): Listener {
+  const listener: Listener = {
+    name: String(body.name || '').trim(),
+    type: String(body.type || '').trim(),
+  }
+
+  for (const [key, value] of Object.entries(body)) {
+    if (key === 'name' || key === 'type') continue
+    if (key === 'port') {
+      if (typeof value === 'number') {
+        listener.port = value
+      } else if (typeof value === 'string' && value.trim()) {
+        const maybeNumber = Number(value)
+        listener.port = Number.isFinite(maybeNumber) ? maybeNumber : value.trim()
+      }
+      continue
+    }
+    if (key === 'listen' && value != null) {
+      listener.listen = String(value).trim()
+      continue
+    }
+    if (value !== undefined) {
+      listener[key] = value
+    }
+  }
+
+  return listener
 }
 
 export async function handleRequest(request: Request, env: Env): Promise<Response> {
@@ -185,6 +244,108 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     config.rules = rules
     await saveConfig(env, serializeConfig(config))
     return withCors(json({ ok: true, ruleCount: rules.length }), request)
+  }
+
+  if (path === '/api/config/proxy-auth-users') {
+    const authErr = await requireAuthOrAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
+    const config = await getParsedConfig(env)
+    const users = getProxyAuthUsers(config)
+
+    if (method === 'GET') {
+      return withCors(json(users), request)
+    }
+
+    if (method === 'POST') {
+      const body = await parseBody(request)
+      const username = String(body.username || '').trim()
+      const password = String(body.password || '')
+      if (!username) return withCors(json({ error: 'username is required' }, 400), request)
+      if (!password) return withCors(json({ error: 'password is required' }, 400), request)
+      if (users.some(user => user.username === username)) {
+        return withCors(json({ error: 'User already exists' }, 409), request)
+      }
+
+      config.authentication = [
+        ...users.map(serializeProxyAuthEntry),
+        serializeProxyAuthEntry({ username, password }),
+      ]
+      await saveConfig(env, serializeConfig(config))
+      return withCors(json({ ok: true }), request)
+    }
+  }
+
+  if (path.startsWith('/api/config/proxy-auth-users/') && method === 'DELETE') {
+    const authErr = await requireAuthOrAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
+    const username = decodeURIComponent(path.slice('/api/config/proxy-auth-users/'.length))
+    const config = await getParsedConfig(env)
+    const users = getProxyAuthUsers(config)
+    if (!users.some(user => user.username === username)) {
+      return withCors(json({ error: 'Not found' }, 404), request)
+    }
+
+    config.authentication = users
+      .filter(user => user.username !== username)
+      .map(serializeProxyAuthEntry)
+    await saveConfig(env, serializeConfig(config))
+    return withCors(json({ ok: true }), request)
+  }
+
+  if (path === '/api/config/listeners') {
+    const authErr = await requireAuthOrAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
+    const config = await getParsedConfig(env)
+    const listeners = Array.isArray(config.listeners) ? config.listeners : []
+
+    if (method === 'GET') {
+      return withCors(json(listeners), request)
+    }
+
+    if (method === 'POST') {
+      const body = await parseBody(request)
+      const listener = normalizeListener(body)
+      if (!listener.name) return withCors(json({ error: 'name is required' }, 400), request)
+      if (!listener.type) return withCors(json({ error: 'type is required' }, 400), request)
+      if (listener.port === undefined || listener.port === '') {
+        return withCors(json({ error: 'port is required' }, 400), request)
+      }
+      if (listeners.some(item => item?.name === listener.name)) {
+        return withCors(json({ error: 'Listener already exists' }, 409), request)
+      }
+
+      config.listeners = [...listeners, listener]
+      await saveConfig(env, serializeConfig(config))
+      return withCors(json({ ok: true }), request)
+    }
+  }
+
+  if (path.startsWith('/api/config/listeners/') && method === 'DELETE') {
+    const authErr = await requireAuthOrAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
+    const name = decodeURIComponent(path.slice('/api/config/listeners/'.length))
+    const config = await getParsedConfig(env)
+    const listeners = Array.isArray(config.listeners) ? config.listeners : []
+    if (!listeners.some(listener => listener?.name === name)) {
+      return withCors(json({ error: 'Not found' }, 404), request)
+    }
+
+    config.listeners = listeners.filter(listener => listener?.name !== name)
+    await saveConfig(env, serializeConfig(config))
+    return withCors(json({ ok: true }), request)
+  }
+
+  if (path === '/api/config/external-ui' && method === 'GET') {
+    const authErr = await requireAuthOrAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
+    const config = await getParsedConfig(env)
+    const externalUi = String(config['external-ui'] || '').trim()
+    return withCors(json({ externalUi }), request)
   }
 
   // --- Setup / Password Status (no auth required) ---

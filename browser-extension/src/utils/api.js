@@ -228,6 +228,10 @@ export async function getProxySnapshot(url, secret) {
 	return data.proxies || {}
 }
 
+export async function getMihomoConfigs(url, secret) {
+	return mihomoFetch(url, secret, '/configs')
+}
+
 export async function getProxyProviders(url, secret) {
 	const data = await mihomoFetch(url, secret, '/providers/proxies')
 	return data.providers || {}
@@ -350,4 +354,32 @@ export async function updateRuleRemote(subMagicUrl, accessKey, oldRule, newRule)
 
 	const text = await res.text()
 	return text ? JSON.parse(text) : { ok: true }
+}
+
+async function subMagicFetch(subMagicUrl, accessKey, path, options = {}) {
+	const baseUrl = subMagicUrl.trim().replace(/\/+$/, '')
+	const headers = { ...options.headers }
+	if (accessKey) {
+		headers.Authorization = `Bearer ${accessKey}`
+	}
+	const res = await fetch(`${baseUrl}${path}`, { ...options, headers })
+	if (!res.ok) {
+		const text = await res.text()
+		throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`)
+	}
+
+	const text = await res.text()
+	return text ? JSON.parse(text) : null
+}
+
+export async function getProxyAuthUsers(subMagicUrl, accessKey) {
+	return subMagicFetch(subMagicUrl, accessKey, '/api/config/proxy-auth-users')
+}
+
+export async function getListeners(subMagicUrl, accessKey) {
+	return subMagicFetch(subMagicUrl, accessKey, '/api/config/listeners')
+}
+
+export async function getExternalUiConfig(subMagicUrl, accessKey) {
+	return subMagicFetch(subMagicUrl, accessKey, '/api/config/external-ui')
 }

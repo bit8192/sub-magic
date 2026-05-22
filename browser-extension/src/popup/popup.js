@@ -7,16 +7,30 @@ import {
 	waitForRuleUpdate,
 	waitForRulePresent,
 	deleteRule,
+	getExternalUiConfig,
+	getListeners,
+	getMihomoConfigs,
+	getProxyAuthUsers,
 	getProxySnapshot,
 	getProxyProviders,
 	setProxySelector,
 } from '../utils/api.js'
+
+const DEFAULT_PROXY_TYPE = 'http'
 
 const state = {
 	domain: '',
 	tabId: 0,
 	mihomo: { url: '', secret: '' },
 	subMagic: { url: '', accessKey: '' },
+	externalUi: '',
+	browser: { id: 'chrome', supportsIsolation: false },
+	proxyIsolation: false,
+	proxyProfile: null,
+	proxyAuthUsers: [],
+	listeners: [],
+	mihomoConfigs: null,
+	proxyValidation: null,
 	proxyGroups: [],
 	proxyMap: {},
 	proxyProviders: {},
@@ -29,8 +43,9 @@ let pollTimer = null
 let proxyRefreshTimer = null
 
 document.addEventListener('DOMContentLoaded', async () => {
-	await loadSettings()
 	await initCurrentTab()
+	await loadSettings()
+	await loadProxyState()
 
 	document.getElementById('btn-add-rule').addEventListener('click', handleAddRule)
 	document.getElementById('btn-save-rule').addEventListener('click', handleSaveRule)
@@ -38,8 +53,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 	document.getElementById('btn-back-routing').addEventListener('click', showRoutingPanel)
 	document.getElementById('btn-back-selector').addEventListener('click', showRoutingPanel)
 	document.getElementById('btn-settings').addEventListener('click', () => chrome.runtime.openOptionsPage())
+	document.getElementById('btn-control-panel').addEventListener('click', openControlPanel)
+	document.getElementById('btn-apply-proxy').addEventListener('click', handleApplyProxy)
 	document.getElementById('rule-type').addEventListener('change', onRuleTypeChange)
 	document.getElementById('selector-result').addEventListener('click', handleSelectorResultClick)
+	document.getElementById('proxy-type').addEventListener('change', () => refreshProxyForm())
+	document.getElementById('proxy-auth-user').addEventListener('change', () => refreshProxyMeta())
+	document.getElementById('proxy-listener').addEventListener('change', () => refreshProxyForm())
 
 	const proxySelect = document.getElementById('rule-proxy-select')
 	proxySelect.addEventListener('change', () => {
@@ -52,8 +72,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 	})
 
 	if (state.mihomo.url) {
+		await refreshControlPanelButton()
+		await refreshProxyControls()
 		await refreshProxyData(true)
 		await startRoutingPoll()
+	} else {
+		refreshControlPanelButton()
+		refreshProxyMeta({ ok: false, reason: '请先在设置中配置 Mihomo API。' })
 	}
 
 	window.addEventListener('pagehide', () => {
@@ -78,19 +103,40 @@ async function loadSettings() {
 	if (data.subMagicUrl) state.subMagic.url = data.subMagicUrl
 	if (data.subMagicKey) state.subMagic.accessKey = data.subMagicKey
 
-	const statusEl = document.getElementById('status-text')
-	const hasMihomo = !!state.mihomo.url
-	const hasSubMagic = !!(state.subMagic.url && state.subMagic.accessKey)
+	document.getElementById('routing-section').style.display = state.mihomo.url ? '' : 'none'
+}
 
-	if (hasMihomo || hasSubMagic) {
-		statusEl.textContent = hasMihomo && hasSubMagic ? '已配置' : '部分配置'
-		statusEl.className = 'status configured'
-	} else {
-		statusEl.textContent = '未配置'
-		statusEl.className = 'status unconfigured'
+async function refreshControlPanelButton() {
+	const button = document.getElementById('btn-control-panel')
+	button.style.display = 'none'
+	state.externalUi = ''
+
+	if (!(state.mihomo.url && state.subMagic.url && state.subMagic.accessKey)) return
+
+	try {
+		const response = await getExternalUiConfig(state.subMagic.url, state.subMagic.accessKey)
+		const externalUi = String(response?.externalUi || '').trim()
+		if (!externalUi) return
+		state.externalUi = externalUi
+		button.style.display = ''
+	} catch {}
+}
+
+function joinExternalUiUrl(baseUrl, externalUi) {
+	const normalizedBase = ensureHttpUrl(baseUrl).replace(/\/+$/, '')
+	const normalizedPath = String(externalUi || '').trim().replace(/^\/+/, '')
+	if (!normalizedPath) return normalizedBase
+	return `${normalizedBase}/${normalizedPath}`
+}
+
+function openControlPanel() {
+	if (!(state.mihomo.url && state.externalUi)) return
+	const url = joinExternalUiUrl(state.mihomo.url, state.externalUi)
+	if (chrome.windows?.create) {
+		chrome.windows.create({ url, type: 'popup' })
+		return
 	}
-
-	document.getElementById('routing-section').style.display = hasMihomo ? '' : 'none'
+	window.open(url, '_blank', 'noopener,noreferrer')
 }
 
 async function initCurrentTab() {
@@ -103,6 +149,372 @@ async function initCurrentTab() {
 			state.domain = ''
 		}
 	}
+}
+
+async function loadProxyState() {
+	const response = await chrome.runtime.sendMessage({ type: 'PROXY_GET_STATE', tabId: state.tabId })
+	if (!response) return
+	state.browser = response.browser || state.browser
+	state.proxyIsolation = !!response.isolationEnabled
+	state.proxyProfile = response.profile || null
+	applyProxyProfileToForm()
+}
+
+function ensureHttpUrl(url) {
+	if (!url) return ''
+	return /^https?:\/\//i.test(url) ? url : `http://${url}`
+}
+
+function getMihomoHost() {
+	try {
+		return new URL(ensureHttpUrl(state.mihomo.url)).hostname
+	} catch {
+		return ''
+	}
+}
+
+function normalizeListenerPort(port) {
+	const value = Number(port)
+	return Number.isFinite(value) ? value : 0
+}
+
+function areConfigInboundPortsDisabled() {
+	const configs = state.mihomoConfigs || {}
+	const ports = ['port', 'socks-port', 'mixed-port']
+	return ports.every((key) => {
+		const value = configs[key]
+		if (value === undefined || value === null || value === '') return true
+		return Number(value) === 0
+	})
+}
+
+function canUseListenersFallback() {
+	return areConfigInboundPortsDisabled() && Array.isArray(state.listeners) && state.listeners.length > 0
+}
+
+function filterListenersByProxyType(proxyType) {
+	const listeners = state.listeners || []
+	if (proxyType === 'http' || proxyType === 'https') {
+		return listeners.filter(listener => listener?.type === 'http' || listener?.type === 'mixed')
+	}
+	if (proxyType === 'socks5') {
+		return listeners.filter(listener => listener?.type === 'socks' || listener?.type === 'mixed')
+	}
+	return listeners.filter(listener => listener?.type === 'socks')
+}
+
+function resolvePortForType(proxyType, selectedListenerName = '') {
+	const configs = state.mihomoConfigs || {}
+	const listeners = filterListenersByProxyType(proxyType)
+
+	if (proxyType === 'http' || proxyType === 'https') {
+		const directPort = Number(configs.port || 0)
+		const mixedPort = Number(configs['mixed-port'] || 0)
+		if (directPort > 0) return { port: directPort, source: 'config', listenerName: '' }
+		if (mixedPort > 0) return { port: mixedPort, source: 'config', listenerName: '' }
+	} else if (proxyType === 'socks5') {
+		const directPort = Number(configs['socks-port'] || 0)
+		const mixedPort = Number(configs['mixed-port'] || 0)
+		if (directPort > 0) return { port: directPort, source: 'config', listenerName: '' }
+		if (mixedPort > 0) return { port: mixedPort, source: 'config', listenerName: '' }
+	} else {
+		const directPort = Number(configs['socks-port'] || 0)
+		if (directPort > 0) return { port: directPort, source: 'config', listenerName: '' }
+	}
+
+	if (!canUseListenersFallback()) {
+		return { port: 0, source: 'config', listenerName: '' }
+	}
+
+	const selected = listeners.find(listener => listener.name === selectedListenerName) || listeners[0] || null
+	return {
+		port: selected ? normalizeListenerPort(selected.port) : 0,
+		source: 'listener',
+		listenerName: selected?.name || '',
+	}
+}
+
+function getSelectedAuthUser() {
+	const selectedUsername = document.getElementById('proxy-auth-user').value
+	if (!selectedUsername) return null
+	return state.proxyAuthUsers.find(user => user.username === selectedUsername) || null
+}
+
+function buildProxyValidation(profile) {
+	if (!state.mihomo.url) {
+		return { ok: false, reason: '请先配置 Mihomo API。' }
+	}
+
+	const host = getMihomoHost()
+	if (!host) {
+		return { ok: false, reason: '无法从 Mihomo API 地址解析代理 host。' }
+	}
+
+	const resolution = resolvePortForType(profile.proxyType, profile.listenerName)
+	if (resolution.source === 'listener' && !resolution.listenerName) {
+		return { ok: false, reason: '当前代理方式未从 configs 获取到端口，请先选择 listener。' }
+	}
+	if (resolution.port <= 0) {
+		if (Array.isArray(state.listeners) && state.listeners.length > 0 && !canUseListenersFallback()) {
+			return { ok: false, reason: '仅当 /configs 中 port、socks-port、mixed-port 全部为 0 或未配置时，才允许改用 listener。' }
+		}
+		return { ok: false, reason: '当前代理方式没有可用端口。' }
+	}
+
+	if (
+		state.browser.id === 'chrome' &&
+		(profile.proxyType === 'socks4' || profile.proxyType === 'socks5') &&
+		profile.authUser
+	) {
+		return { ok: false, reason: 'Chrome 无法为 SOCKS 代理自动注入认证，请改用 HTTP/HTTPS 或清空代理用户。' }
+	}
+
+	return {
+		ok: true,
+		host,
+		port: resolution.port,
+		source: resolution.source,
+		listenerName: resolution.listenerName,
+	}
+}
+
+function buildProfileFromForm() {
+	const currentProfile = state.proxyProfile || {}
+	const draft = {
+		enabled: true,
+		proxyType: document.getElementById('proxy-type').value,
+		host: getMihomoHost(),
+		port: 0,
+		listenerName: document.getElementById('proxy-listener').value,
+		source: 'config',
+		authUser: getSelectedAuthUser(),
+	}
+	const validation = buildProxyValidation(draft)
+	state.proxyValidation = validation
+	if (validation.ok) {
+		draft.host = validation.host
+		draft.port = validation.port
+		draft.source = validation.source
+		draft.listenerName = validation.listenerName
+	} else {
+		draft.host = getMihomoHost()
+		draft.port = 0
+		draft.source = draft.listenerName ? 'listener' : currentProfile.source || 'config'
+	}
+	return draft
+}
+
+function renderProxyAuthUsers() {
+	const select = document.getElementById('proxy-auth-user')
+	const currentUsername = state.proxyProfile?.authUser?.username || ''
+	const users = [...state.proxyAuthUsers]
+	if (currentUsername && !users.some(user => user.username === currentUsername)) {
+		users.unshift({ username: currentUsername, password: state.proxyProfile?.authUser?.password || '' })
+	}
+	let html = '<option value="">不使用代理用户</option>'
+	for (const user of users) {
+		const selected = user.username === currentUsername ? ' selected' : ''
+		html += `<option value="${escAttr(user.username)}"${selected}>${escHtml(user.username)}</option>`
+	}
+	select.innerHTML = html
+}
+
+function renderListenerOptions(proxyType) {
+	const listeners = [...filterListenersByProxyType(proxyType)]
+	const groupEl = document.getElementById('proxy-listener-group')
+	const select = document.getElementById('proxy-listener')
+	const resolution = resolvePortForType(proxyType, state.proxyProfile?.listenerName || '')
+	const listenersAvailable = canUseListenersFallback()
+	const needsListener = listenersAvailable && resolution.source === 'listener'
+
+	if (resolution.listenerName && !listeners.some(listener => listener.name === resolution.listenerName)) {
+		listeners.unshift({ name: resolution.listenerName, type: 'unknown', port: state.proxyProfile?.port || '' })
+	}
+
+	groupEl.style.display = needsListener ? '' : 'none'
+
+	let html = '<option value="">请选择</option>'
+	for (const listener of listeners) {
+		const port = normalizeListenerPort(listener.port)
+		const selected = listener.name === resolution.listenerName ? ' selected' : ''
+		html += `<option value="${escAttr(listener.name)}"${selected}>${escHtml(listener.name)} · ${escHtml(listener.type || '')} · ${port || '-'}</option>`
+	}
+	select.innerHTML = html
+	select.disabled = !listenersAvailable
+}
+
+function applyProxyProfileToForm() {
+	const profile = state.proxyProfile || {
+		proxyType: DEFAULT_PROXY_TYPE,
+		listenerName: '',
+		authUser: null,
+	}
+	document.getElementById('proxy-type').value = profile.proxyType || DEFAULT_PROXY_TYPE
+	renderProxyAuthUsers()
+	renderListenerOptions(profile.proxyType || DEFAULT_PROXY_TYPE)
+	if (profile.listenerName) {
+		document.getElementById('proxy-listener').value = profile.listenerName
+	}
+	refreshProxyMeta()
+}
+
+async function refreshProxyControls() {
+	try {
+		const configs = await getMihomoConfigs(state.mihomo.url, state.mihomo.secret)
+		let authUsers = []
+		let listeners = []
+		if (state.subMagic.url && state.subMagic.accessKey) {
+			const [usersResult, listenersResult] = await Promise.allSettled([
+				getProxyAuthUsers(state.subMagic.url, state.subMagic.accessKey),
+				getListeners(state.subMagic.url, state.subMagic.accessKey),
+			])
+			if (usersResult.status === 'fulfilled' && Array.isArray(usersResult.value)) {
+				authUsers = usersResult.value
+			}
+			if (listenersResult.status === 'fulfilled' && Array.isArray(listenersResult.value)) {
+				listeners = listenersResult.value
+			}
+		}
+		state.mihomoConfigs = configs || {}
+		state.proxyAuthUsers = Array.isArray(authUsers) ? authUsers : []
+		state.listeners = Array.isArray(listeners) ? listeners : []
+		if (!state.proxyProfile) {
+			state.proxyProfile = {
+				proxyType: DEFAULT_PROXY_TYPE,
+				host: '',
+				port: 0,
+				listenerName: '',
+				source: 'config',
+				authUser: null,
+			}
+		}
+		applyProxyProfileToForm()
+		const nextProfile = buildProfileFromForm()
+		const needsBootstrap =
+			state.proxyProfile.proxyType !== nextProfile.proxyType ||
+			state.proxyProfile.host !== nextProfile.host ||
+			state.proxyProfile.port !== nextProfile.port ||
+			state.proxyProfile.listenerName !== nextProfile.listenerName ||
+			(state.proxyProfile.authUser?.username || '') !== (nextProfile.authUser?.username || '')
+		state.proxyProfile = nextProfile
+		if (needsBootstrap) {
+			await chrome.runtime.sendMessage({ type: 'PROXY_SET_STATE', tabId: state.tabId, profile: nextProfile })
+		}
+		refreshProxyMeta()
+	} catch (error) {
+		refreshProxyMeta({ ok: false, reason: `代理控制初始化失败: ${error.message}` })
+	}
+}
+
+function refreshProxyForm() {
+	const proxyType = document.getElementById('proxy-type').value
+	renderListenerOptions(proxyType)
+	refreshProxyMeta()
+}
+
+function getProfileSignature(profile) {
+	return JSON.stringify({
+		proxyType: profile?.proxyType || '',
+		host: profile?.host || '',
+		port: Number(profile?.port || 0),
+		listenerName: profile?.listenerName || '',
+		authUser: profile?.authUser?.username || '',
+		source: profile?.source || '',
+	})
+}
+
+function isProxyProfileActive(profile) {
+	return !!(profile && profile.host && Number(profile.port) > 0)
+}
+
+function updateApplyButton(validation, draftProfile) {
+	const button = document.getElementById('btn-apply-proxy')
+	button.className = 'btn'
+
+	if (!validation.ok) {
+		button.disabled = true
+		button.classList.add('btn-secondary')
+		button.textContent = '不可用'
+		return
+	}
+
+	button.disabled = false
+	const currentActive = isProxyProfileActive(state.proxyProfile)
+	const applied = getProfileSignature(state.proxyProfile) === getProfileSignature(draftProfile)
+	if (applied) {
+		button.classList.add('btn-warning')
+		button.textContent = '关闭代理'
+		return
+	}
+
+	button.classList.add('btn-success')
+	button.textContent = currentActive ? '应用代理' : '启用代理'
+}
+
+function refreshProxyMeta(overrideValidation = null) {
+	const statusEl = document.getElementById('proxy-status')
+	const metaEl = document.getElementById('proxy-meta')
+	const draftProfile = {
+		proxyType: document.getElementById('proxy-type').value,
+		host: getMihomoHost(),
+		port: 0,
+		listenerName: document.getElementById('proxy-listener').value,
+		authUser: getSelectedAuthUser(),
+	}
+	const validation = overrideValidation || buildProxyValidation(draftProfile)
+
+	if (!validation.ok) {
+		statusEl.textContent = '不可用'
+		statusEl.className = 'routing-status error'
+		metaEl.innerHTML = `隔离模式: <strong>${state.proxyIsolation ? '按标签页' : '全局共享'}</strong><br>${escHtml(validation.reason)}`
+		updateApplyButton(validation, draftProfile)
+		return
+	}
+
+	draftProfile.port = validation.port
+	draftProfile.host = validation.host
+	draftProfile.listenerName = validation.listenerName
+	draftProfile.source = validation.source
+	statusEl.textContent = isProxyProfileActive(state.proxyProfile) ? '代理中' : '未代理'
+	statusEl.className = 'routing-status connected'
+	metaEl.innerHTML = `隔离模式: <strong>${state.proxyIsolation ? '按标签页' : '全局共享'}</strong><br>地址: <strong>${escHtml(validation.host)}:${validation.port}</strong>`
+	updateApplyButton(validation, draftProfile)
+}
+
+async function handleApplyProxy() {
+	if (!state.mihomo.url) {
+		refreshProxyMeta({ ok: false, reason: '请先在设置中配置 Mihomo API。' })
+		return
+	}
+
+	const draftProfile = buildProfileFromForm()
+	if (!state.proxyValidation?.ok) {
+		refreshProxyMeta()
+		return
+	}
+
+	const applied = getProfileSignature(state.proxyProfile) === getProfileSignature({
+		...draftProfile,
+		port: state.proxyValidation.port,
+		host: state.proxyValidation.host,
+		listenerName: state.proxyValidation.listenerName,
+		source: state.proxyValidation.source,
+	})
+
+	const profile = applied
+		? {
+			...draftProfile,
+			host: '',
+			port: 0,
+			listenerName: '',
+			source: 'config',
+			authUser: null,
+		}
+		: draftProfile
+
+	state.proxyProfile = profile
+	await chrome.runtime.sendMessage({ type: 'PROXY_SET_STATE', tabId: state.tabId, profile })
+	refreshProxyMeta()
 }
 
 async function startRoutingPoll() {

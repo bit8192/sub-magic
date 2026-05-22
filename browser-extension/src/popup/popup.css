@@ -86,6 +86,13 @@ body {
 	background: linear-gradient(135deg, var(--primary), var(--accent));
 	color: #fff;
 }
+.btn-primary:disabled,
+.btn-secondary:disabled,
+.btn-accent:disabled,
+.btn-danger:disabled {
+	opacity: 0.6;
+	cursor: not-allowed;
+}
 .btn-secondary {
 	background: var(--surface-2);
 	color: var(--text);
@@ -94,6 +101,14 @@ body {
 .btn-secondary:hover { border-color: var(--primary); }
 .btn-accent {
 	background: linear-gradient(135deg, var(--accent), #a78bfa);
+	color: #fff;
+}
+.btn-success {
+	background: linear-gradient(135deg, #16a34a, #22c55e);
+	color: #fff;
+}
+.btn-warning {
+	background: linear-gradient(135deg, #dc2626, #ef4444);
 	color: #fff;
 }
 
@@ -142,6 +157,9 @@ body {
 	margin-bottom: 4px;
 	text-transform: uppercase;
 	letter-spacing: 0.3px;
+}
+.form-group label input[type='checkbox'] {
+	margin-right: 8px;
 }
 .form-group input,
 .form-group select {
@@ -196,6 +214,20 @@ body {
 .routing-status.loading { color: var(--warning); }
 .routing-status.connected { color: var(--success); }
 .routing-status.error { color: var(--danger); }
+
+.proxy-meta {
+	margin-top: 8px;
+	padding: 10px;
+	background: var(--surface-2);
+	border-radius: 4px;
+	font-size: 11px;
+	line-height: 1.6;
+	color: var(--text-muted);
+}
+
+.proxy-meta strong {
+	color: var(--text);
+}
 
 .routing-result {
 	max-height: 240px;
@@ -414,13 +446,6 @@ body {
 	align-items: center;
 	margin-top: 8px;
 }
-
-.status {
-	font-size: 11px;
-	color: var(--text-muted);
-}
-.status.configured { color: var(--success); }
-.status.unconfigured { color: var(--warning); }
 
 .spinner {
 	display: inline-block;

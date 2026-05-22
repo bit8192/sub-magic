@@ -37,6 +37,22 @@ export interface ProxyGroup {
   [key: string]: unknown
 }
 
+export interface ProxyAuthUser {
+  username: string
+  password: string
+}
+
+export interface Listener {
+  name: string
+  type: string
+  listen?: string
+  port?: number | string
+  users?: Array<string | Record<string, unknown>>
+  rule?: string
+  proxy?: string
+  [key: string]: unknown
+}
+
 export interface Rule {
   type: string
   payload: string
@@ -77,6 +93,8 @@ export interface GeneralConfig {
 
 export interface ClashConfig {
   general?: GeneralConfig & Record<string, unknown>
+  authentication?: string[]
+  listeners?: Listener[]
   'proxy-providers'?: Record<string, ProxyProvider>
   'proxy-groups'?: ProxyGroup[]
   rules?: string[]
@@ -257,6 +275,15 @@ const KEY_ORDERS_BY_PATH: Record<string, readonly string[]> = {
     'strategy',
     'hidden',
     'icon',
+  ],
+  'listeners.*': [
+    'name',
+    'type',
+    'listen',
+    'port',
+    'users',
+    'rule',
+    'proxy',
   ],
 }
 
