@@ -6,6 +6,30 @@ param(
 	[string]$UpdateScriptName = 'sub-magic.ps1'
 )
 
+$currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+	$scriptPath = $MyInvocation.MyCommand.Path
+	if (-not [string]::IsNullOrWhiteSpace($scriptPath)) {
+		Write-Host '正在请求管理员权限...'
+		if (-not [System.IO.Path]::IsPathRooted($ConfigPath)) {
+			$ConfigPath = [System.IO.Path]::GetFullPath((Join-Path $PWD.Path $ConfigPath))
+		}
+		$cmdBody = "Set-Location -LiteralPath '$($PWD.Path.Replace("'","''"))'; & '$($scriptPath.Replace("'","''"))'"
+		foreach ($key in $MyInvocation.BoundParameters.Keys) {
+			$val = $MyInvocation.BoundParameters[$key]
+			$cmdBody += " -$key"
+			if ($val -isnot [switch] -and $val -isnot [bool]) {
+				$cmdBody += " '$($val.ToString().Replace("'","''"))'"
+			}
+		}
+		$fullCmd = "powershell -NoProfile -ExecutionPolicy Bypass -Command `"$cmdBody`""
+		Write-Host "[Elevated command]: $fullCmd"
+		$proc = Start-Process -FilePath PowerShell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$cmdBody`"" -Verb RunAs -Wait -PassThru
+		exit $proc.ExitCode
+	}
+	throw '此脚本需要管理员权限。请以管理员身份运行 PowerShell 后重试。'
+}
+
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -241,6 +265,7 @@ function Register-UpdateTask {
 	schtasks /run /tn $ScheduledTaskName
 }
 
+try {
 if (-not [System.IO.Path]::IsPathRooted($ConfigPath)) {
 	$ConfigPath = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $ConfigPath))
 }
@@ -281,3 +306,11 @@ Install-UpdateScript -BaseUrl $baseUrl -ConfigFilePath $ConfigPath -TargetScript
 Register-UpdateTask -ScheduledTaskName $TaskName -ScriptPath $updateScriptPath
 
 Write-Host "Installed: task=$TaskName, config=$ConfigPath"
+} catch {
+	Write-Host "安装失败: $_" -ForegroundColor Red
+} finally {
+	if ($host.UI.RawUI) {
+		Write-Host "`n按任意键退出..."
+		$null = $host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+	}
+}
