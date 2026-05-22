@@ -80,6 +80,32 @@ body {
 	border-color: var(--primary);
 }
 
+.input-with-toggle {
+	display: flex;
+	align-items: stretch;
+	gap: 8px;
+}
+
+.input-with-toggle input {
+	flex: 1;
+}
+
+.toggle-visibility {
+	padding: 0 12px;
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	background: var(--surface-2);
+	color: var(--text-muted);
+	font-size: 12px;
+	cursor: pointer;
+	transition: var(--transition);
+}
+
+.toggle-visibility:hover {
+	color: var(--text);
+	border-color: var(--primary);
+}
+
 .actions {
 	display: flex;
 	align-items: center;

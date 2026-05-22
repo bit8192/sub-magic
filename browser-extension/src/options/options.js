@@ -5,6 +5,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 	if (data.subMagicUrl) document.getElementById('submagic-url').value = data.subMagicUrl
 	if (data.subMagicKey) document.getElementById('submagic-key').value = data.subMagicKey
 
+	document.querySelectorAll('.toggle-visibility').forEach((button) => {
+		button.addEventListener('click', () => {
+			const input = document.getElementById(button.dataset.target)
+			const isPassword = input.type === 'password'
+			input.type = isPassword ? 'text' : 'password'
+			button.textContent = isPassword ? '隐藏' : '显示'
+		})
+	})
+
 	document.getElementById('btn-save').addEventListener('click', async () => {
 		const mihomoUrl = document.getElementById('mihomo-url').value.trim()
 		const mihomoSecret = document.getElementById('mihomo-secret').value.trim()
