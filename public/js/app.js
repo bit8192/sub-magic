@@ -1,5 +1,5 @@
 import { set401Handler } from './api.js'
-import { renderLogin, doLogin, doLogout, checkAuth, onLoggedIn } from './auth.js'
+import { renderLogin, doLogin, doLogout, checkAuth, onLoggedIn, renderSetup, doSetup } from './auth.js'
 import { esc, toast, closeModal } from './utils.js'
 import { initRouter, switchView } from './router.js'
 import { copySubUrl, copyApiKey, rotateSubscriptionKey, rotateApiKey, copyAutoScript, copyUninstallScript, generateAutoScript } from './views/index.js'
@@ -25,8 +25,10 @@ onLoggedIn(() => {
 Object.assign(window, {
   doLogin,
   doLogout,
+  doSetup,
   switchView,
   renderLogin,
+  renderSetup,
   copySubUrl,
   copyApiKey,
   rotateSubscriptionKey,

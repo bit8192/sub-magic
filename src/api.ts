@@ -13,6 +13,8 @@ import {
 import {
   verifyPassword,
   verifySubscriptionKey,
+  isPasswordSet,
+  createPassword,
   generateSessionId,
   createSessionCookie,
   clearSessionCookie,
@@ -134,6 +136,26 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     config.rules = rules
     await saveConfig(env, serializeConfig(config))
     return withCors(json({ ok: true, ruleCount: rules.length }), request)
+  }
+
+  // --- Setup / Password Status (no auth required) ---
+  if (path === '/api/password-status' && method === 'GET') {
+    const set = await isPasswordSet(env)
+    return json({ passwordSet: set })
+  }
+
+  if (path === '/api/setup' && method === 'POST') {
+    const alreadySet = await isPasswordSet(env)
+    if (alreadySet) return json({ error: 'Password already set' }, 403)
+    const body = await parseBody(request)
+    const password = String(body.password || '')
+    if (password.length < 6) return json({ error: 'Password must be at least 6 characters' }, 400)
+    await createPassword(env, password)
+    const sessionId = generateSessionId()
+    await createSession(env, sessionId)
+    return new Response(JSON.stringify({ ok: true }), {
+      headers: { 'Content-Type': 'application/json', 'Set-Cookie': createSessionCookie(sessionId) },
+    })
   }
 
   // Auth endpoints

@@ -28,7 +28,4 @@
 	// "kv_namespaces": [
 	//   { "binding": "SUB_MAGIC", "id": "" }
 	// ],
-	"vars": {
-		"PASSWORD": "admin"
-	}
 }

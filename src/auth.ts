@@ -3,6 +3,8 @@ import {
   getSubscriptionKey,
   setApiKeyHash,
   setSubscriptionKey,
+  getPasswordHash,
+  setPasswordHash,
 } from './config'
 
 const SESSION_COOKIE = 'session'
@@ -21,7 +23,21 @@ function timingSafeEqual(a: string, b: string): boolean {
   return result === 0
 }
 
+export async function isPasswordSet(env: Env): Promise<boolean> {
+  const hash = await getPasswordHash(env)
+  return !!hash
+}
+
+export async function createPassword(env: Env, password: string): Promise<void> {
+  const hash = await sha256Hex(password)
+  await setPasswordHash(env, hash)
+}
+
 export async function verifyPassword(env: Env, password: string): Promise<boolean> {
+  const storedHash = await getPasswordHash(env)
+  if (storedHash) {
+    return timingSafeEqual(storedHash, await sha256Hex(password))
+  }
   const stored = env.PASSWORD
   if (!stored) return false
   return timingSafeEqual(stored, password)

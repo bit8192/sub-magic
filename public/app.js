@@ -39,6 +39,65 @@ function toast(msg, type = 'info') {
 
 let currentView = 'index'
 
+async function fetchPasswordStatus() {
+  const res = await fetch('/api/password-status')
+  const data = await res.json()
+  return data.passwordSet
+}
+
+function renderSetup() {
+  currentView = 'setup'
+  const app = document.getElementById('app')
+  app.innerHTML = `
+    <div class="login-container">
+      <div class="login-card">
+        <h1>Sub Magic</h1>
+        <p>首次使用，请设置管理员密码</p>
+        <div class="form-group">
+          <label>密码 (至少6位)</label>
+          <input type="password" id="setup-password" placeholder="设置管理密码" />
+        </div>
+        <div class="form-group">
+          <label>确认密码</label>
+          <input type="password" id="setup-password2" placeholder="再次输入密码" onkeydown="if(event.key==='Enter')doSetup()" />
+        </div>
+        <button class="btn-primary" onclick="doSetup()" style="width:100%">创建密码</button>
+        <div id="setup-error" class="error"></div>
+      </div>
+    </div>`
+}
+
+async function doSetup() {
+  const pwd = document.getElementById('setup-password').value
+  const pwd2 = document.getElementById('setup-password2').value
+  const errEl = document.getElementById('setup-error')
+
+  if (pwd.length < 6) {
+    errEl.textContent = '密码至少需要6位'
+    return
+  }
+  if (pwd !== pwd2) {
+    errEl.textContent = '两次密码不一致'
+    return
+  }
+
+  try {
+    const res = await fetch('/api/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pwd }),
+    })
+    const data = await res.json()
+    if (res.ok) {
+      await checkAuth()
+    } else {
+      errEl.textContent = data.error || '设置失败'
+    }
+  } catch {
+    errEl.textContent = '网络错误'
+  }
+}
+
 function renderLogin() {
   currentView = 'login'
   const app = document.getElementById('app')
@@ -71,6 +130,11 @@ async function doLogin() {
 
 async function checkAuth() {
   try {
+    const passwordSet = await fetchPasswordStatus()
+    if (!passwordSet) {
+      renderSetup()
+      return
+    }
     const res = await API.get('/api/check')
     if (res.ok) renderApp()
     else renderLogin()

@@ -1,6 +1,7 @@
 import { parseConfig, serializeConfig, type ClashConfig } from './yaml'
 
 const KV_CONFIG_KEY = 'config'
+const KV_PASSWORD_HASH = 'password_hash'
 const KV_SUBSCRIPTION_KEY = 'subscription_key'
 const KV_API_KEY_HASH = 'api_key_hash'
 
@@ -52,6 +53,18 @@ export async function setApiKeyHash(env: Env, keyHash: string): Promise<void> {
   const ns = kv(env)
   if (!ns) return
   await ns.put(KV_API_KEY_HASH, keyHash)
+}
+
+export async function getPasswordHash(env: Env): Promise<string | null> {
+  const ns = kv(env)
+  if (!ns) return null
+  return await ns.get(KV_PASSWORD_HASH)
+}
+
+export async function setPasswordHash(env: Env, hash: string): Promise<void> {
+  const ns = kv(env)
+  if (!ns) return
+  await ns.put(KV_PASSWORD_HASH, hash)
 }
 
 const VERSIONS_INDEX_KEY = 'versions:index'
