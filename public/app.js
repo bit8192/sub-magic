@@ -189,7 +189,11 @@ async function renderDashboard(container) {
   const keyRes = await API.get('/api/access-key')
   const configRes = await API.get('/api/config')
   const config = configRes.config || ''
-  const providerCount = (config.match(/^\s+url:/gm) || []).length
+  let providerCount = 0
+  try {
+    const providers = await API.get('/api/config/proxy-providers')
+    providerCount = Array.isArray(providers) ? providers.length : Object.keys(providers).length
+  } catch { /* ignore */ }
   let versionCount = 0
   try {
     const versions = await API.get('/api/config/versions')
@@ -207,7 +211,7 @@ async function renderDashboard(container) {
     </div>
     <div class="card">
       <h2>配置概览</h2>
-      <p>订阅源数: ${(config.match(/^\s+url:/gm) || []).length}</p>
+      <p>订阅源数: ${providerCount}</p>
       <p>代理组数: ${(config.match(/^\s+- name:/gm) || []).length}</p>
       <p>规则数: ${(config.match(/^\s+- /gm) || []).length}</p>
       <p>历史版本: ${versionCount}</p>

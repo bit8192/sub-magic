@@ -9,7 +9,11 @@ export async function renderDashboard(container) {
 	])
 	const config = configRes.config || ''
 	const meta = metaRes || {}
-	const providerCount = (config.match(/^\s+url:/gm) || []).length
+	let providerCount = 0
+	try {
+		const providers = await API.get('/api/config/proxy-providers')
+		providerCount = Array.isArray(providers) ? providers.length : Object.keys(providers).length
+	} catch { /* ignore */ }
 	let versionCount = 0
 	try {
 		const versions = await API.get('/api/config/versions')
