@@ -16,7 +16,6 @@
 	"observability": {
 		"enabled": true
 	},
-	"upload_source_maps": true,
 	/**
 	 * KV 命名空间绑定：
 	 * 生产环境无需在此配置。部署后登录 Cloudflare Dashboard →
@@ -28,4 +27,5 @@
 	// "kv_namespaces": [
 	//   { "binding": "SUB_MAGIC", "id": "" }
 	// ],
+	"upload_source_maps": true
 }
