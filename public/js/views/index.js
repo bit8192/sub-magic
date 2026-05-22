@@ -128,6 +128,10 @@ export async function renderDashboard(container) {
 		</div>`
 
 	window._subUrl = subUrl
+	const platformSelect = document.getElementById('script-platform')
+	if (platformSelect && navigator.platform.indexOf('Win') !== -1) {
+		platformSelect.value = 'windows'
+	}
 	generateAutoScript()
 }
 
@@ -151,7 +155,7 @@ export function generateAutoScript() {
 
 	if (platform === 'windows') {
 		if (modeSelect) modeSelect.disabled = true
-		installCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "& { $tmp = Join-Path $env:TEMP 'sub-magic-install.ps1'; Invoke-WebRequest -UseBasicParsing '${location.origin}/install.ps1' -OutFile $tmp; & $tmp -ConfigPath '${toPwshSingleQuoted(configPath)}' -SubUrl '${toPwshSingleQuoted(subUrl)}' }"`
+		installCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "& { Invoke-WebRequest -UseBasicParsing '${location.origin}/install.ps1' -OutFile ([IO.Path]::Combine([IO.Path]::GetTempPath(),'sub-magic-install.ps1')); & ([IO.Path]::Combine([IO.Path]::GetTempPath(),'sub-magic-install.ps1')) -ConfigPath '${toPwshSingleQuoted(configPath)}' -SubUrl '${toPwshSingleQuoted(subUrl)}' }"`
 		uninstallCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "Unregister-ScheduledTask -TaskName 'sub-magic' -Confirm:$false -ErrorAction SilentlyContinue; Remove-Item -LiteralPath '.\\sub-magic.ps1' -Force -ErrorAction SilentlyContinue"`
 	} else {
 		if (modeSelect) modeSelect.disabled = false

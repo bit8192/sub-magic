@@ -130,30 +130,6 @@ function Download-MihomoExe {
 	}
 }
 
-function Invoke-MihomoServiceCommand {
-	param(
-		[string]$ExePath,
-		[string[]]$Arguments
-	)
-
-	$variants = @(
-		@('-service') + $Arguments,
-		@('service') + $Arguments
-	)
-
-	foreach ($variant in $variants) {
-		try {
-			& $ExePath @variant | Out-Host
-			if ($LASTEXITCODE -eq 0) {
-				return $true
-			}
-		} catch {
-		}
-	}
-
-	return $false
-}
-
 function Install-MihomoService {
 	param(
 		[string]$ExePath,
@@ -165,21 +141,29 @@ function Install-MihomoService {
 		New-Item -ItemType Directory -Path $configDir -Force | Out-Null
 	}
 
-	Write-Step '尝试安装 Mihomo Windows 服务'
-	$installed = Invoke-MihomoServiceCommand -ExePath $ExePath -Arguments @('install', '-d', $configDir)
-	if (-not $installed) {
-		throw "无法通过 Mihomo 内置服务命令安装服务，请手动检查 $ExePath 是否支持 service install。"
+	$serviceName = 'mihomo'
+	$displayName = 'Mihomo Service'
+	$binPath = "`"$ExePath`" -d `"$configDir`""
+
+	$existing = Get-MihomoService
+	if ($existing) {
+		Write-Step "发现已存在的服务: $($existing.Name)，正在移除..."
+		Stop-Service -Name $existing.Name -Force -ErrorAction SilentlyContinue
+		sc.exe delete $existing.Name
+		if ($LASTEXITCODE -ne 0) {
+			throw "无法移除现有服务: $($existing.Name)"
+		}
+		Start-Sleep -Seconds 2
 	}
 
-	Start-Sleep -Seconds 1
-	$service = Get-MihomoService
-	if ($service -and $service.State -ne 'Running') {
-		try {
-			Start-Service -Name $service.Name
-		} catch {
-			Invoke-MihomoServiceCommand -ExePath $ExePath -Arguments @('start') | Out-Null
-		}
+	Write-Step "创建服务 $serviceName"
+	New-Service -Name $serviceName -DisplayName $displayName -BinaryPathName $binPath -StartupType Automatic
+	if (-not $?) {
+		throw "New-Service 创建失败"
 	}
+
+	Write-Step "启动服务 $serviceName"
+	Start-Service -Name $serviceName
 }
 
 function Install-UpdateScript {
@@ -191,8 +175,8 @@ function Install-UpdateScript {
 	)
 
 	Write-Step "下载自动更新脚本到 $TargetScriptPath"
-	$scriptContent = Invoke-WebRequest -Uri "$BaseUrl/sub-magic.ps1" -UseBasicParsing
-	$content = $scriptContent.Content.Replace('__CONFIG_PATH__', (Escape-PowerShellSingleQuoted $ConfigFilePath)).Replace('__SUB_URL__', (Escape-PowerShellSingleQuoted $SubscriptionUrl))
+	$rawContent = (New-Object System.Net.WebClient).DownloadString("$BaseUrl/sub-magic.ps1")
+	$content = $rawContent.Replace('__CONFIG_PATH__', (Escape-PowerShellSingleQuoted $ConfigFilePath)).Replace('__SUB_URL__', (Escape-PowerShellSingleQuoted $SubscriptionUrl))
 	[System.IO.File]::WriteAllText($TargetScriptPath, $content, [System.Text.UTF8Encoding]::new($false))
 }
 
@@ -202,15 +186,63 @@ function Register-UpdateTask {
 		[string]$ScriptPath
 	)
 
-	$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
-	$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1)
-	$trigger.RepetitionInterval = (New-TimeSpan -Minutes 1)
-	$trigger.RepetitionDuration = (New-TimeSpan -Days 3650)
-	$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+	$startTime = [DateTime]::Now.AddMinutes(1).ToString('yyyy-MM-ddTHH:mm:ss')
+	$xmlPath = Join-Path $env:TEMP "$ScheduledTaskName.xml"
 
-	Write-Step "注册计划任务 $ScheduledTaskName"
-	Register-ScheduledTask -TaskName $ScheduledTaskName -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
-	Start-ScheduledTask -TaskName $ScheduledTaskName
+	$xml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Sub Magic config updater</Description>
+  </RegistrationInfo>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>S4U</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Triggers>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT1M</Interval>
+        <Duration>P3650D</Duration>
+      </Repetition>
+      <StartBoundary>$startTime</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+  </Triggers>
+  <Actions Context="Author">
+    <Exec>
+      <Command>powershell.exe</Command>
+      <Arguments>-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$ScriptPath"</Arguments>
+    </Exec>
+  </Actions>
+  <Settings>
+    <Enabled>true</Enabled>
+  </Settings>
+</Task>
+"@
+	try {
+		[System.IO.File]::WriteAllText($xmlPath, $xml, [System.Text.Encoding]::Unicode)
+		$env:_SCHTN = $ScheduledTaskName
+		$env:_SCHTXML = $xmlPath
+		Write-Step "注册计划任务 $ScheduledTaskName"
+		cmd.exe /c --% schtasks /create /tn "%_SCHTN%" /xml "%_SCHTXML%" /f
+		if ($LASTEXITCODE -ne 0) {
+			throw "schtasks /create /xml 失败，退出码: $LASTEXITCODE"
+		}
+	} finally {
+		Remove-Item env:_SCHTN, env:_SCHTXML -ErrorAction SilentlyContinue
+		if (Test-Path -LiteralPath $xmlPath) {
+			Remove-Item -LiteralPath $xmlPath -Force -ErrorAction SilentlyContinue
+		}
+	}
+
+	schtasks /run /tn $ScheduledTaskName
+}
+
+if (-not [System.IO.Path]::IsPathRooted($ConfigPath)) {
+	$ConfigPath = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $ConfigPath))
 }
 
 $baseUrl = $SubUrl -replace '/sub/.*$', ''

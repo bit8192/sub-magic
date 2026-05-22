@@ -5,11 +5,16 @@ $ConfigPath = '__CONFIG_PATH__'
 $SubUrl = '__SUB_URL__'
 $StateDir = Join-Path $env:LOCALAPPDATA 'SubMagic'
 $EtagPath = Join-Path $StateDir 'sub-magic.etag'
+$LogPath = Join-Path $StateDir 'sub-magic.log'
 $TempFile = Join-Path $env:TEMP ("sub-magic-" + [guid]::NewGuid().ToString('N') + '.yaml')
 
 function Write-Log {
 	param([string]$Message)
-	Write-Host "[$(Get-Date -Format s)] $Message"
+	$line = "[$(Get-Date -Format s)] $Message"
+	Write-Host $line
+	try {
+		Add-Content -LiteralPath $LogPath -Value $line -ErrorAction SilentlyContinue
+	} catch {}
 }
 
 function Get-MihomoService {
@@ -109,6 +114,11 @@ try {
 	New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
 	New-Item -ItemType Directory -Path (Split-Path -Parent $ConfigPath) -Force | Out-Null
 
+	$maxLogBytes = 512KB
+	if ((Test-Path -LiteralPath $LogPath) -and ((Get-Item -LiteralPath $LogPath).Length -gt $maxLogBytes)) {
+		Set-Content -LiteralPath $LogPath -Value '' -ErrorAction SilentlyContinue
+	}
+
 	$etag = ''
 	if (Test-Path -LiteralPath $EtagPath) {
 		$etag = (Get-Content -LiteralPath $EtagPath -Raw).Trim()
@@ -166,7 +176,9 @@ try {
 
 	Invoke-ConfigReload
 } catch {
+	$errLine = "[$(Get-Date -Format s)] ERROR: $_"
 	Write-Error $_
+	try { Add-Content -LiteralPath $LogPath -Value $errLine -ErrorAction SilentlyContinue } catch {}
 	exit 1
 } finally {
 	if (Test-Path -LiteralPath $TempFile) {
