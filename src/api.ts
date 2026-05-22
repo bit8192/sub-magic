@@ -1,5 +1,12 @@
 import {
-  getConfig, saveConfig, getParsedConfig, getAccessKey,
+  deleteLegacyAccessKey,
+  getApiKeyHash,
+  getConfig,
+  getLegacyAccessKey,
+  getParsedConfig,
+  getSubscriptionKey,
+  getSubscriptionKeyHash,
+  saveConfig,
   getConfigVersions, getConfigVersion, saveConfigVersion,
   restoreConfigVersion, deleteConfigVersion,
 } from './config'
@@ -7,16 +14,25 @@ import {
   parseConfig, serializeConfig, parseRule, type ProxyGroup, type ProxyProvider,
 } from './yaml'
 import {
-  verifyPassword, verifyAccessKey, generateSessionId, createSessionCookie, clearSessionCookie,
-  createSession, deleteSession, requireAuth, generateAccessKey,
+  verifyPassword,
+  verifySubscriptionKey,
+  generateSessionId,
+  createSessionCookie,
+  clearSessionCookie,
+  createSession,
+  deleteSession,
+  requireAuth,
+  generateSubscriptionKey,
+  generateApiKey,
+  requireAccessKey,
 } from './auth'
 import { generateSubscription } from './subscribe'
 import { getSubscriptionInfo } from './subscription-info'
 
-function json(data: unknown, status = 200): Response {
+function json(data: unknown, status = 200, extraHeaders?: HeadersInit): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...extraHeaders },
   })
 }
 
@@ -24,18 +40,103 @@ function parseBody(request: Request): Promise<Record<string, unknown>> {
   return request.json().catch(() => ({})) as Promise<Record<string, unknown>>
 }
 
+function isApiRequest(path: string): boolean {
+  return path.startsWith('/api/') || path.startsWith('/sub/')
+}
+
+function withCors(response: Response, request: Request): Response {
+  const origin = request.headers.get('Origin')
+  if (!origin) return response
+
+  const headers = new Headers(response.headers)
+  headers.set('Access-Control-Allow-Origin', origin)
+  headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+  headers.set('Access-Control-Allow-Headers', 'Authorization, Content-Type')
+  headers.append('Vary', 'Origin')
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  })
+}
+
+function corsPreflight(request: Request): Response {
+  const origin = request.headers.get('Origin') || '*'
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': origin,
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': request.headers.get('Access-Control-Request-Headers') || 'Authorization, Content-Type',
+      'Access-Control-Max-Age': '86400',
+      Vary: 'Origin',
+    },
+  })
+}
+
 export async function handleRequest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url)
   const path = url.pathname
   const method = request.method
 
+  if (method === 'OPTIONS' && isApiRequest(path)) {
+    return corsPreflight(request)
+  }
+
   // Subscription endpoint (no auth required)
   if (method === 'GET' && path.startsWith('/sub/')) {
     const key = path.slice(5)
     if (key.length < 8) return json({ error: 'Invalid key' }, 400)
-    const valid = await verifyAccessKey(env, key)
-    if (!valid) return json({ error: 'Forbidden' }, 403)
-    return generateSubscription(env, request)
+    const valid = await verifySubscriptionKey(env, key)
+    if (!valid) return withCors(json({ error: 'Forbidden' }, 403), request)
+    return withCors(await generateSubscription(env, request), request)
+  }
+
+  // Browser extension routes authenticated by API key
+  if (path === '/api/rules/add' && method === 'POST') {
+    const authErr = await requireAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
+    const body = await parseBody(request)
+    const rule = String(body.rule || '')
+    if (!rule) return withCors(json({ error: 'rule is required' }, 400), request)
+
+    const config = await getParsedConfig(env)
+    const rules = config.rules || []
+    const matchIdx = rules.findIndex(r => r.trim().toUpperCase().startsWith('MATCH'))
+
+    if (matchIdx !== -1) {
+      rules.splice(matchIdx, 0, rule)
+    } else {
+      rules.push(rule)
+    }
+
+    config.rules = rules
+    await saveConfig(env, serializeConfig(config))
+    return withCors(json({ ok: true, ruleCount: rules.length }), request)
+  }
+
+  if (path === '/api/rules/update' && method === 'POST') {
+    const authErr = await requireAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
+    const body = await parseBody(request)
+    const oldRule = String(body.oldRule || '')
+    const newRule = String(body.newRule || '')
+    if (!oldRule || !newRule) {
+      return withCors(json({ error: 'oldRule and newRule are required' }, 400), request)
+    }
+
+    const config = await getParsedConfig(env)
+    const rules = config.rules || []
+    const idx = rules.indexOf(oldRule)
+    if (idx === -1) return withCors(json({ error: 'Rule not found' }, 404), request)
+
+    rules[idx] = newRule
+    config.rules = rules
+    await saveConfig(env, serializeConfig(config))
+    return withCors(json({ ok: true, ruleCount: rules.length }), request)
   }
 
   // Auth endpoints
@@ -292,17 +393,69 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     return json({ ok: true })
   }
 
-  // --- Access Key ---
+  // --- Keys ---
   if (path === '/api/access-key') {
     if (method === 'GET') {
-      const key = await getAccessKey(env)
-      return json({ key })
+      const subscriptionKey = await getSubscriptionKey(env)
+      const subscriptionKeyHash = await getSubscriptionKeyHash(env)
+      const apiKeyHash = await getApiKeyHash(env)
+      const legacySharedKey = await getLegacyAccessKey(env)
+
+      let generatedSubscriptionKey: string | null = null
+      let generatedApiKey: string | null = null
+
+      if (!subscriptionKey && !subscriptionKeyHash && !legacySharedKey) {
+        generatedSubscriptionKey = await generateSubscriptionKey(env)
+      }
+      if (!apiKeyHash && !legacySharedKey) {
+        generatedApiKey = await generateApiKey(env)
+      }
+
+      return json({
+        subscriptionKey: subscriptionKey || generatedSubscriptionKey,
+        apiKey: generatedApiKey,
+        subscriptionKeyPresent: !!(subscriptionKey || subscriptionKeyHash || legacySharedKey || generatedSubscriptionKey),
+        apiKeyPresent: !!(apiKeyHash || legacySharedKey || generatedApiKey),
+        legacySharedKey: legacySharedKey ? legacySharedKey : null,
+        legacySharedKeyPresent: !!legacySharedKey,
+      }, 200, { 'Cache-Control': 'no-store' })
     }
 
     if (method === 'POST') {
-      const newKey = await generateAccessKey(env)
-      return json({ key: newKey })
+      const newSubscriptionKey = await generateSubscriptionKey(env)
+      const newApiKey = await generateApiKey(env)
+      await deleteLegacyAccessKey(env)
+      return json({
+        subscriptionKey: newSubscriptionKey,
+        apiKey: newApiKey,
+      }, 200, { 'Cache-Control': 'no-store' })
     }
+  }
+
+  if (path === '/api/access-key/rotate' && method === 'POST') {
+    const body = await parseBody(request)
+    const target = String(body.target || 'both')
+
+    if (target === 'subscription') {
+      const subscriptionKey = await generateSubscriptionKey(env)
+      if (await getApiKeyHash(env)) {
+        await deleteLegacyAccessKey(env)
+      }
+      return json({ subscriptionKey }, 200, { 'Cache-Control': 'no-store' })
+    }
+
+    if (target === 'api') {
+      const apiKey = await generateApiKey(env)
+      if (await getSubscriptionKey(env) || await getSubscriptionKeyHash(env)) {
+        await deleteLegacyAccessKey(env)
+      }
+      return json({ apiKey }, 200, { 'Cache-Control': 'no-store' })
+    }
+
+    const subscriptionKey = await generateSubscriptionKey(env)
+    const apiKey = await generateApiKey(env)
+    await deleteLegacyAccessKey(env)
+    return json({ subscriptionKey, apiKey }, 200, { 'Cache-Control': 'no-store' })
   }
 
   // --- Subscription Info ---
@@ -313,51 +466,6 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     const result = await getSubscriptionInfo(env, name)
     if ('error' in result) return json({ error: result.error }, 400)
     return json(result)
-  }
-
-  // --- Add rule by access key (for browser extension) ---
-  if (path === '/api/rules/add-by-key' && method === 'POST') {
-    const body = await parseBody(request)
-    const key = String(body.key || '')
-    const rule = String(body.rule || '')
-    if (!key || !rule) return json({ error: 'key and rule are required' }, 400)
-    const valid = await verifyAccessKey(env, key)
-    if (!valid) return json({ error: 'Forbidden' }, 403)
-
-    const config = await getParsedConfig(env)
-    const rules = config.rules || []
-
-    const matchIdx = rules.findIndex(r => r.trim().toUpperCase().startsWith('MATCH'))
-
-    if (matchIdx !== -1) {
-      rules.splice(matchIdx, 0, rule)
-    } else {
-      rules.push(rule)
-    }
-
-    config.rules = rules
-    await saveConfig(env, serializeConfig(config))
-    return json({ ok: true, ruleCount: rules.length })
-  }
-
-  if (path === '/api/rules/update-by-key' && method === 'POST') {
-    const body = await parseBody(request)
-    const key = String(body.key || '')
-    const oldRule = String(body.oldRule || '')
-    const newRule = String(body.newRule || '')
-    if (!key || !oldRule || !newRule) return json({ error: 'key, oldRule and newRule are required' }, 400)
-    const valid = await verifyAccessKey(env, key)
-    if (!valid) return json({ error: 'Forbidden' }, 403)
-
-    const config = await getParsedConfig(env)
-    const rules = config.rules || []
-    const idx = rules.indexOf(oldRule)
-    if (idx === -1) return json({ error: 'Rule not found' }, 404)
-
-    rules[idx] = newRule
-    config.rules = rules
-    await saveConfig(env, serializeConfig(config))
-    return json({ ok: true, ruleCount: rules.length })
   }
 
   return json({ error: 'Not found' }, 404)

@@ -315,10 +315,13 @@ export async function deleteRule(mihomoUrl, secret, ruleStr) {
 
 export async function addRuleRemote(subMagicUrl, accessKey, ruleStr) {
 	const baseUrl = subMagicUrl.replace(/\/+$/, '')
-	const res = await fetch(`${baseUrl}/api/rules/add-by-key`, {
+	const res = await fetch(`${baseUrl}/api/rules/add`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ key: accessKey, rule: ruleStr }),
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${accessKey}`,
+		},
+		body: JSON.stringify({ rule: ruleStr }),
 	})
 
 	if (!res.ok) {
@@ -331,10 +334,13 @@ export async function addRuleRemote(subMagicUrl, accessKey, ruleStr) {
 
 export async function updateRuleRemote(subMagicUrl, accessKey, oldRule, newRule) {
 	const baseUrl = subMagicUrl.replace(/\/+$/, '')
-	const res = await fetch(`${baseUrl}/api/rules/update-by-key`, {
+	const res = await fetch(`${baseUrl}/api/rules/update`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ key: accessKey, oldRule, newRule }),
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${accessKey}`,
+		},
+		body: JSON.stringify({ oldRule, newRule }),
 	})
 
 	if (!res.ok) {

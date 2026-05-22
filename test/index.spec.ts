@@ -2,6 +2,7 @@ import { env, createExecutionContext, waitOnExecutionContext, SELF } from "cloud
 import { describe, it, expect, beforeEach } from "vitest"
 import worker from "../src"
 import { parseConfig, serializeConfig, parseRule, serializeRule } from "../src/yaml"
+import { hashKey } from "../src/auth"
 
 beforeEach(async () => {
   await env.SUB_MAGIC.put("config", `mixed-port: 7890
@@ -21,7 +22,8 @@ proxies:
   - name: DIRECT
     type: direct
 `)
-  await env.SUB_MAGIC.put("access_key", "testkey123")
+  await env.SUB_MAGIC.put("subscription_key", "sm_sub_testkey123")
+  await env.SUB_MAGIC.put("api_key_hash", await hashKey("sm_api_testkey456"))
 })
 
 describe("YAML utilities", () => {
@@ -134,7 +136,7 @@ describe("Auth", () => {
 
 describe("Subscription endpoint", () => {
   it("returns config with valid key", async () => {
-    const res = await SELF.fetch("http://example.com/sub/testkey123")
+    const res = await SELF.fetch("http://example.com/sub/sm_sub_testkey123")
     expect(res.status).toBe(200)
     expect(res.headers.get("Content-Type")).toContain("text/yaml")
     const text = await res.text()
@@ -256,7 +258,10 @@ describe("API endpoints", () => {
     const res = await SELF.fetch("http://example.com/api/access-key", { headers: { Cookie: cookie } })
     expect(res.status).toBe(200)
     const data = await res.json()
-    expect(data.key).toBe("testkey123")
+    expect(data.subscriptionKey).toBe("sm_sub_testkey123")
+    expect(data.apiKey).toBeNull()
+    expect(data.subscriptionKeyPresent).toBe(true)
+    expect(data.apiKeyPresent).toBe(true)
   })
 
   it("POST /api/access-key rotates key", async () => {
@@ -266,28 +271,35 @@ describe("API endpoints", () => {
     })
     expect(res.status).toBe(200)
     const data = await res.json()
-    expect(data.key).not.toBe("testkey123")
-    expect(data.key.length).toBeGreaterThan(8)
+    expect(data.subscriptionKey).toContain("sm_sub_")
+    expect(data.apiKey).toContain("sm_api_")
   })
 
-  it("POST /api/rules/add-by-key adds a rule before MATCH", async () => {
-    const res = await SELF.fetch("http://example.com/api/rules/add-by-key", {
+  it("POST /api/rules/add adds a rule before MATCH", async () => {
+    const res = await SELF.fetch("http://example.com/api/rules/add", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: "testkey123", rule: "DOMAIN-SUFFIX,example.com,Proxy" }),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer sm_api_testkey456",
+        Origin: "chrome-extension://test",
+      },
+      body: JSON.stringify({ rule: "DOMAIN-SUFFIX,example.com,Proxy" }),
     })
     expect(res.status).toBe(200)
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("chrome-extension://test")
     const stored = await env.SUB_MAGIC.get("config")
     expect(stored).toContain("DOMAIN-SUFFIX,example.com,Proxy")
     expect(stored?.indexOf("DOMAIN-SUFFIX,example.com,Proxy")).toBeLessThan(stored?.indexOf("MATCH,Proxy") ?? 0)
   })
 
-  it("POST /api/rules/update-by-key updates an existing rule", async () => {
-    const res = await SELF.fetch("http://example.com/api/rules/update-by-key", {
+  it("POST /api/rules/update updates an existing rule", async () => {
+    const res = await SELF.fetch("http://example.com/api/rules/update", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer sm_api_testkey456",
+      },
       body: JSON.stringify({
-        key: "testkey123",
         oldRule: "GEOIP,CN,DIRECT",
         newRule: "GEOIP,CN,Proxy",
       }),
@@ -296,5 +308,50 @@ describe("API endpoints", () => {
     const stored = await env.SUB_MAGIC.get("config")
     expect(stored).toContain("GEOIP,CN,Proxy")
     expect(stored).not.toContain("GEOIP,CN,DIRECT")
+  })
+
+  it("POST /api/rules/add rejects missing API key", async () => {
+    const res = await SELF.fetch("http://example.com/api/rules/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "chrome-extension://test" },
+      body: JSON.stringify({ rule: "DOMAIN-SUFFIX,example.com,Proxy" }),
+    })
+    expect(res.status).toBe(401)
+    expect(res.headers.get("WWW-Authenticate")).toBe("Bearer")
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("chrome-extension://test")
+  })
+
+  it("OPTIONS /api/rules/add returns CORS preflight headers", async () => {
+    const res = await SELF.fetch("http://example.com/api/rules/add", {
+      method: "OPTIONS",
+      headers: {
+        Origin: "chrome-extension://test",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization,content-type",
+      },
+    })
+    expect(res.status).toBe(204)
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("chrome-extension://test")
+    expect(res.headers.get("Access-Control-Allow-Headers")).toContain("authorization")
+  })
+
+  it("supports legacy shared key during migration", async () => {
+    await env.SUB_MAGIC.delete("subscription_key_hash")
+    await env.SUB_MAGIC.delete("subscription_key")
+    await env.SUB_MAGIC.delete("api_key_hash")
+    await env.SUB_MAGIC.put("access_key", "legacy_shared_key")
+
+    const subRes = await SELF.fetch("http://example.com/sub/legacy_shared_key")
+    expect(subRes.status).toBe(200)
+
+    const apiRes = await SELF.fetch("http://example.com/api/rules/add", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer legacy_shared_key",
+      },
+      body: JSON.stringify({ rule: "DOMAIN-SUFFIX,legacy.example,Proxy" }),
+    })
+    expect(apiRes.status).toBe(200)
   })
 })

@@ -16,7 +16,20 @@ export async function renderDashboard(container) {
 		versionCount = versions.length
 	} catch { /* ignore */ }
 
-	const subUrl = `${location.origin}/sub/${keyRes.key || ''}`
+	const visibleSubscriptionKey = keyRes.subscriptionKey || keyRes.legacySharedKey || ''
+	const visibleApiKey = keyRes.apiKey || keyRes.legacySharedKey || ''
+	const subUrl = visibleSubscriptionKey ? `${location.origin}/sub/${visibleSubscriptionKey}` : ''
+	const isLegacyShared = !!keyRes.legacySharedKeyPresent
+	const subscriptionVisible = !!visibleSubscriptionKey
+	const apiVisible = !!visibleApiKey
+	const subscriptionPresent = !!keyRes.subscriptionKeyPresent
+	const apiPresent = !!keyRes.apiKeyPresent
+	const subscriptionHint = subscriptionVisible
+		? ''
+		: (subscriptionPresent ? '当前订阅 Key 来自旧哈希存储或旧共享 Key；如需长期可见，请轮换生成新的独立订阅 Key。' : '尚未生成订阅 Key。')
+	const apiHint = apiVisible
+		? ''
+		: (apiPresent ? '服务端仅保存哈希，现有 API Key 不可回显；如需查看，请轮换生成新 Key。' : '尚未生成 API Key。')
 
 	let externalUiHtml = ''
 	if (meta['external-controller'] && meta['external-ui']) {
@@ -31,13 +44,28 @@ export async function renderDashboard(container) {
 		</div>`
 	}
 
-	container.innerHTML = `
+		container.innerHTML = `
+		${isLegacyShared ? `
+		<div class="card">
+			<h2>安全提示</h2>
+			<p style="color:var(--warning);font-size:13px;line-height:1.7">当前仍在使用旧的共享 Key。它同时用于订阅和插件接口，建议尽快分别轮换为独立的订阅 Key 和 API Key。</p>
+		</div>` : ''}
 		<div class="card">
 			<h2>订阅链接</h2>
+			<p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">订阅客户端只应使用订阅 Key。${subscriptionHint}</p>
 			<div class="key-display">
-				<input type="text" id="sub-url" readonly value="${subUrl}" />
+				<input type="text" id="sub-url" readonly value="${subUrl}" placeholder="${subscriptionPresent ? '轮换后可查看新的订阅链接' : '点击生成订阅 Key'}" />
 				<button class="btn-primary" onclick="copySubUrl()">复制</button>
-				<button class="btn-warning" onclick="rotateKey()">轮换 Key</button>
+				<button class="btn-warning" onclick="rotateSubscriptionKey()">${subscriptionPresent ? '轮换订阅 Key' : '生成订阅 Key'}</button>
+			</div>
+		</div>
+		<div class="card">
+			<h2>API Key</h2>
+			<p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">浏览器插件调用远程接口时使用独立的 API Key，通过 <code>Authorization: Bearer &lt;api-key&gt;</code> 发送。${apiHint}</p>
+			<div class="key-display">
+				<input type="text" id="api-key" readonly value="${visibleApiKey}" placeholder="${apiPresent ? '轮换后可查看新的 API Key' : '点击生成 API Key'}" />
+				<button class="btn-primary" onclick="copyApiKey()">复制</button>
+				<button class="btn-warning" onclick="rotateApiKey()">${apiPresent ? '轮换 API Key' : '生成 API Key'}</button>
 			</div>
 		</div>
 		<div class="card">
@@ -51,6 +79,11 @@ export async function renderDashboard(container) {
 		<div class="card">
 			<h2>浏览器插件</h2>
 			<p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">安装浏览器插件后可在任意网站快速查询路由链路并添加规则</p>
+			<div class="extension-install-note" style="margin-bottom:12px">
+				<strong>配置项：</strong><br>
+				Sub Magic 地址：<code>${esc(location.origin)}</code><br>
+				API Key：上方的 <code>API Key</code>
+			</div>
 			<div class="extension-links">
 				<a href="/extensions/sub-magic-chrome.zip" download class="btn-primary extension-btn">
 					<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="8" r="3" fill="currentColor"/><path d="M2 8h12" stroke="currentColor" stroke-width="1" opacity="0.4"/></svg>
@@ -131,15 +164,37 @@ export function copyUninstallScript() {
 
 export function copySubUrl() {
 	const input = document.getElementById('sub-url')
+	if (!input.value) {
+		toast('当前没有可复制的订阅链接，请先生成或轮换订阅 Key', 'warning')
+		return
+	}
 	input.select()
 	navigator.clipboard.writeText(input.value).then(() => toast('已复制', 'success'))
 }
 
-export async function rotateKey() {
-	if (!confirm('确定轮换订阅 Key？现有链接将立即失效。')) return
-	const res = await API.post('/api/access-key/rotate')
-	document.getElementById('sub-url').value = `${location.origin}/sub/${res.key}`
-	window._subUrl = `${location.origin}/sub/${res.key}`
+export function copyApiKey() {
+	const input = document.getElementById('api-key')
+	if (!input.value) {
+		toast('当前没有可复制的 API Key，请先生成或轮换 API Key', 'warning')
+		return
+	}
+	input.select()
+	navigator.clipboard.writeText(input.value).then(() => toast('已复制', 'success'))
+}
+
+export async function rotateSubscriptionKey() {
+	if (!confirm('确定轮换订阅 Key？现有订阅链接将立即失效。')) return
+	const res = await API.post('/api/access-key/rotate', { target: 'subscription' })
+	const nextSubUrl = `${location.origin}/sub/${res.subscriptionKey}`
+	document.getElementById('sub-url').value = nextSubUrl
+	window._subUrl = nextSubUrl
 	generateAutoScript()
-	toast('Key 已更新', 'success')
+	toast('订阅 Key 已更新', 'success')
+}
+
+export async function rotateApiKey() {
+	if (!confirm('确定轮换 API Key？现有插件配置将立即失效。')) return
+	const res = await API.post('/api/access-key/rotate', { target: 'api' })
+	document.getElementById('api-key').value = res.apiKey
+	toast('API Key 已更新', 'success')
 }

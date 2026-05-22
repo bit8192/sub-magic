@@ -1,7 +1,10 @@
 import { parseConfig, serializeConfig, type ClashConfig } from './yaml'
 
 const KV_CONFIG_KEY = 'config'
-const KV_ACCESS_KEY = 'access_key'
+const KV_LEGACY_ACCESS_KEY = 'access_key'
+const KV_SUBSCRIPTION_KEY = 'subscription_key'
+const KV_SUBSCRIPTION_KEY_HASH = 'subscription_key_hash'
+const KV_API_KEY_HASH = 'api_key_hash'
 
 function kv(env: Env): KVNamespace | null {
   return (env as any).SUB_MAGIC ?? null
@@ -29,16 +32,52 @@ export async function saveParsedConfig(env: Env, config: ClashConfig): Promise<v
   await saveConfig(env, serializeConfig(config))
 }
 
-export async function getAccessKey(env: Env): Promise<string | null> {
+export async function getLegacyAccessKey(env: Env): Promise<string | null> {
   const ns = kv(env)
   if (!ns) return null
-  return await ns.get(KV_ACCESS_KEY)
+  return await ns.get(KV_LEGACY_ACCESS_KEY)
 }
 
-export async function setAccessKey(env: Env, key: string): Promise<void> {
+export async function deleteLegacyAccessKey(env: Env): Promise<void> {
   const ns = kv(env)
   if (!ns) return
-  await ns.put(KV_ACCESS_KEY, key)
+  await ns.delete(KV_LEGACY_ACCESS_KEY)
+}
+
+export async function getSubscriptionKeyHash(env: Env): Promise<string | null> {
+  const ns = kv(env)
+  if (!ns) return null
+  return await ns.get(KV_SUBSCRIPTION_KEY_HASH)
+}
+
+export async function setSubscriptionKeyHash(env: Env, keyHash: string): Promise<void> {
+  const ns = kv(env)
+  if (!ns) return
+  await ns.put(KV_SUBSCRIPTION_KEY_HASH, keyHash)
+}
+
+export async function getSubscriptionKey(env: Env): Promise<string | null> {
+  const ns = kv(env)
+  if (!ns) return null
+  return await ns.get(KV_SUBSCRIPTION_KEY)
+}
+
+export async function setSubscriptionKey(env: Env, key: string): Promise<void> {
+  const ns = kv(env)
+  if (!ns) return
+  await ns.put(KV_SUBSCRIPTION_KEY, key)
+}
+
+export async function getApiKeyHash(env: Env): Promise<string | null> {
+  const ns = kv(env)
+  if (!ns) return null
+  return await ns.get(KV_API_KEY_HASH)
+}
+
+export async function setApiKeyHash(env: Env, keyHash: string): Promise<void> {
+  const ns = kv(env)
+  if (!ns) return
+  await ns.put(KV_API_KEY_HASH, keyHash)
 }
 
 const VERSIONS_INDEX_KEY = 'versions:index'
@@ -293,13 +332,7 @@ rules:
   - GEOIP,twitter,Twitter
   - GEOIP,CN,\u56fd\u5185
   - MATCH,\u5176\u4ed6
-`
+  `
 
   await saveConfig(env, defaultYaml)
-
-  const existingKey = await getAccessKey(env)
-  if (!existingKey) {
-    const key = crypto.randomUUID().replace(/-/g, '')
-    await setAccessKey(env, key)
-  }
 }

@@ -146,8 +146,8 @@ https://your-worker.example.com/sub/{key}
 
 除后台外，服务还提供两个给浏览器扩展使用的接口：
 
-- `POST /api/rules/add-by-key`
-- `POST /api/rules/update-by-key`
+- `POST /api/rules/add`
+- `POST /api/rules/update`
 
 它们基于访问 Key 写入规则，无需后台会话。
 
@@ -159,7 +159,7 @@ https://your-worker.example.com/sub/{key}
 
 - 读取当前页面相关路由信息。
 - 显示命中的规则链路与可选代理组。
-- 调用 `add-by-key` / `update-by-key` 快速把规则写回 Worker。
+- 调用 `add` / `update` 快速把规则写回 Worker。
 
 构建扩展：
 
@@ -237,8 +237,8 @@ browser-extension/
 
 - `GET/POST/PUT /api/config/rules`
 - `PUT/DELETE /api/config/rules/{index}`
-- `POST /api/rules/add-by-key`
-- `POST /api/rules/update-by-key`
+- `POST /api/rules/add`
+- `POST /api/rules/update`
 
 版本与 Key：
 

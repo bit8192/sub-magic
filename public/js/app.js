@@ -2,7 +2,7 @@ import { set401Handler } from './api.js'
 import { renderLogin, doLogin, doLogout, checkAuth, onLoggedIn } from './auth.js'
 import { esc, toast, closeModal } from './utils.js'
 import { initRouter, switchView } from './router.js'
-import { copySubUrl, rotateKey, copyAutoScript, copyUninstallScript, generateAutoScript } from './views/index.js'
+import { copySubUrl, copyApiKey, rotateSubscriptionKey, rotateApiKey, copyAutoScript, copyUninstallScript, generateAutoScript } from './views/index.js'
 import { showProviderForm, saveProvider, deleteProvider } from './views/providers.js'
 // Provider usage functions are assigned to window inside providers.js
 import { showGroupForm, saveGroup, deleteGroup } from './views/groups.js'
@@ -28,7 +28,9 @@ Object.assign(window, {
   switchView,
   renderLogin,
   copySubUrl,
-  rotateKey,
+  copyApiKey,
+  rotateSubscriptionKey,
+  rotateApiKey,
   copyAutoScript,
   copyUninstallScript,
   generateAutoScript,
