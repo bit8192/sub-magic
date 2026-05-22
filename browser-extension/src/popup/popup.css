@@ -442,26 +442,6 @@ body {
 	padding: 16px 0;
 }
 
-.debugger-warning {
-	display: flex;
-	align-items: flex-start;
-	gap: 6px;
-	padding: 8px 10px;
-	margin-bottom: 8px;
-	background: rgba(245, 158, 11, 0.1);
-	border: 1px solid rgba(245, 158, 11, 0.3);
-	border-radius: 4px;
-	font-size: 11px;
-	color: var(--warning);
-	line-height: 1.5;
-}
-
-.debugger-warning-icon {
-	flex-shrink: 0;
-	font-size: 12px;
-	margin-top: 1px;
-}
-
 .route-shared-tag {
 	display: inline-flex;
 	align-items: center;
@@ -474,4 +454,30 @@ body {
 	font-size: 9px;
 	font-weight: 500;
 	vertical-align: middle;
+}
+
+.route-confidence-tag {
+	display: inline-flex;
+	align-items: center;
+	padding: 1px 6px;
+	margin-left: 6px;
+	border-radius: 3px;
+	font-size: 9px;
+	font-weight: 600;
+	vertical-align: middle;
+}
+
+.route-confidence-tag.high {
+	background: rgba(0, 255, 136, 0.14);
+	color: var(--success);
+}
+
+.route-confidence-tag.medium {
+	background: rgba(0, 212, 255, 0.14);
+	color: var(--primary);
+}
+
+.route-confidence-tag.low {
+	background: rgba(245, 158, 11, 0.16);
+	color: var(--warning);
 }

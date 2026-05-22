@@ -23,7 +23,6 @@ const state = {
 	ruleMode: null,
 	editingRule: null,
 	currentSelector: '',
-	debuggerStatus: 'unavailable',
 }
 
 let pollTimer = null
@@ -219,25 +218,6 @@ function setProxyValue(value) {
 function updateRoutingDisplay(data) {
 	const resultEl = document.getElementById('routing-result')
 	const statusEl = document.getElementById('routing-status')
-	const warningEl = document.getElementById('debugger-warning')
-	const warningText = document.getElementById('debugger-warning-text')
-
-	if (data.debuggerStatus) {
-		state.debuggerStatus = data.debuggerStatus
-	}
-
-	if (state.debuggerStatus === 'unavailable') {
-		warningEl.style.display = 'flex'
-		warningText.textContent = '启用调试器权限可获得更精确的Tab流量统计。多Tab同域名场景下数据可能融合，请前往 about:addons 检查扩展权限。'
-	} else if (state.debuggerStatus === 'failed') {
-		warningEl.style.display = 'flex'
-		warningText.textContent = '调试器连接失败，流量统计可能不精确。多Tab同域名场景下数据可能融合。'
-	} else if (state.debuggerStatus === 'available') {
-		warningEl.style.display = 'flex'
-		warningText.textContent = '正在启用精确实时流量监控...'
-	} else {
-		warningEl.style.display = 'none'
-	}
 
 	if (data.status === 'disconnected') {
 		statusEl.textContent = '已断开，重连中...'
@@ -267,24 +247,21 @@ function updateRoutingDisplay(data) {
 	}
 
 	const sharedCount = data.groups.filter(g => g.shared).length
-	const exclusiveOnly = sharedCount === 0
 	statusEl.textContent = `监控中 · 命中 ${data.total} 连接 · ${data.groups.length} 组${sharedCount > 0 ? ` (${sharedCount} 可能共享)` : ''}`
 	statusEl.className = 'routing-status connected'
-
-	if (state.debuggerStatus === 'attached' && exclusiveOnly) {
-		warningEl.style.display = 'none'
-	}
 
 	let html = ''
 	for (const group of data.groups) {
 		const ruleStr = group.rule ? formatRule(group.rule, group.rulePayload) : ''
 		const chainHtml = renderChain(group.chain)
 		const sharedTag = group.shared ? '<span class="route-shared-tag" title="此连接可能与其他Tab共享">共享</span>' : ''
+		const confidenceLabel = group.confidence === 'high' ? '高' : group.confidence === 'medium' ? '中' : '低'
+		const confidenceTag = `<span class="route-confidence-tag ${group.confidence}" title="匹配置信度：${confidenceLabel}${group.portMatched ? '，端口一致' : ''}">${confidenceLabel}</span>`
 
 		html += `<div class="route-card">
 			<div class="route-header">
 				<span class="route-count">${group.count}</span>
-				<span class="route-host" title="${escAttr(group.host)}">${escHtml(group.host)}${sharedTag}</span>
+				<span class="route-host" data-host="${escAttr(group.host)}" title="${escAttr(group.host)}">${escHtml(group.host)}${sharedTag}${confidenceTag}</span>
 			</div>
 			<div class="route-chain-line">${chainHtml}</div>`
 
@@ -298,7 +275,7 @@ function updateRoutingDisplay(data) {
 	resultEl.innerHTML = html
 
 	resultEl.querySelectorAll('.route-host').forEach(el => {
-		el.addEventListener('click', () => showAddPanel(el.textContent.trim().replace('共享', '').trim()))
+		el.addEventListener('click', () => showAddPanel(el.getAttribute('data-host') || ''))
 	})
 
 	resultEl.querySelectorAll('.route-rule-line').forEach(el => {

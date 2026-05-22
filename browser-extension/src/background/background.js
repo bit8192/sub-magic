@@ -13,16 +13,37 @@ let proxyGroups = []
 const tabRequests = new Map()
 const REQUEST_TTL = 30000
 const CORRELATION_WINDOW = 2000
-
-const debuggerAttached = new Set()
-const debuggerAvailable = typeof chrome !== 'undefined' && !!chrome.debugger
-const tabLastPoll = new Map()
-const CLEANUP_INTERVAL = 5000
-let cleanupTimer = null
-let debuggerFailedForTab = new Set()
+const MAX_REQUESTS_PER_TAB = 200
+const SHARED_SCORE_DELTA = 12
+const WINNING_SCORE_DELTA = 8
 
 function extractHost(url) {
-	try { return new URL(url).hostname } catch { return '' }
+	try { return normalizeHost(new URL(url).hostname) } catch { return '' }
+}
+
+function normalizeHost(host) {
+	return String(host || '').trim().toLowerCase().replace(/\.+$/, '')
+}
+
+function getDefaultPort(protocol) {
+	if (protocol === 'https:' || protocol === 'wss:') return '443'
+	if (protocol === 'http:' || protocol === 'ws:') return '80'
+	return ''
+}
+
+function extractRequestInfo(url) {
+	try {
+		const parsed = new URL(url)
+		const host = normalizeHost(parsed.hostname)
+		if (!host) return null
+		return {
+			host,
+			port: parsed.port || getDefaultPort(parsed.protocol),
+			url: parsed.href,
+		}
+	} catch {
+		return null
+	}
 }
 
 function httpToWs(url) {
@@ -32,17 +53,103 @@ function httpToWs(url) {
 
 function recordRequest(tabId, url) {
 	if (!tabId || tabId < 0) return
-	const host = extractHost(url)
-	if (!host) return
-	let domainMap = tabRequests.get(tabId)
-	if (!domainMap) {
-		domainMap = new Map()
-		tabRequests.set(tabId, domainMap)
+	const info = extractRequestInfo(url)
+	if (!info) return
+	const requests = tabRequests.get(tabId) || []
+	const now = Date.now()
+	requests.push({
+		host: info.host,
+		port: info.port,
+		ts: now,
+		url: info.url,
+	})
+	const recentRequests = requests
+		.filter(entry => now - entry.ts < REQUEST_TTL)
+		.slice(-MAX_REQUESTS_PER_TAB)
+	tabRequests.set(tabId, recentRequests)
+}
+
+function cleanupRequests(now) {
+	for (const [tabId, requests] of tabRequests) {
+		const recentRequests = requests.filter(entry => now - entry.ts < REQUEST_TTL)
+		if (recentRequests.length > 0) {
+			tabRequests.set(tabId, recentRequests.slice(-MAX_REQUESTS_PER_TAB))
+		} else {
+			tabRequests.delete(tabId)
+		}
 	}
-	const entry = domainMap.get(host) || { lastSeen: 0, count: 0 }
-	entry.lastSeen = Date.now()
-	entry.count++
-	domainMap.set(host, entry)
+}
+
+function getTabRequests(tabId, now) {
+	const requests = tabRequests.get(tabId) || []
+	return requests.filter(entry => now - entry.ts < REQUEST_TTL)
+}
+
+function getHostMatchScore(connectionHost, requestHost) {
+	const connHost = normalizeHost(connectionHost)
+	const reqHost = normalizeHost(requestHost)
+	if (!connHost || !reqHost) return 0
+	if (connHost === reqHost) return 60
+	const connBare = connHost.replace(/^www\./, '')
+	const reqBare = reqHost.replace(/^www\./, '')
+	if (connBare === reqBare) return 56
+	if (connHost.endsWith('.' + reqHost) || reqHost.endsWith('.' + connHost)) return 46
+	if (connHost.endsWith('.' + reqBare) || reqBare.endsWith('.' + connHost)) return 42
+	return 0
+}
+
+function getFreshnessScore(requestTs, now) {
+	const age = now - requestTs
+	if (age <= 2000) return 18
+	if (age <= 5000) return 14
+	if (age <= 10000) return 9
+	if (age <= REQUEST_TTL) return 4
+	return 0
+}
+
+function getStartProximityScore(requestTs, connectionStart) {
+	const startTs = Date.parse(connectionStart || '')
+	if (!Number.isFinite(startTs)) return 0
+	const delta = Math.abs(requestTs - startTs)
+	if (delta <= 2000) return 12
+	if (delta <= 5000) return 8
+	if (delta <= 15000) return 3
+	return 0
+}
+
+function scoreConnectionAgainstRequests(connection, requests, now) {
+	const connectionHost = normalizeHost(connection.metadata?.host || connection.metadata?.sniffHost || '')
+	const connectionPort = String(connection.metadata?.destinationPort || '')
+	let best = null
+
+	for (const request of requests) {
+		const hostScore = getHostMatchScore(connectionHost, request.host)
+		if (hostScore === 0) continue
+
+		let score = hostScore
+		if (request.port && connectionPort) {
+			score += request.port === connectionPort ? 20 : -8
+		}
+		score += getFreshnessScore(request.ts, now)
+		score += getStartProximityScore(request.ts, connection.start)
+
+		if (!best || score > best.score || (score === best.score && request.ts > best.requestTs)) {
+			best = {
+				score,
+				requestTs: request.ts,
+				hostScore,
+				portMatched: !!(request.port && connectionPort && request.port === connectionPort),
+			}
+		}
+	}
+
+	return best || { score: 0, requestTs: 0, hostScore: 0, portMatched: false }
+}
+
+function getConfidenceLabel(score) {
+	if (score >= 78) return 'high'
+	if (score >= 58) return 'medium'
+	return 'low'
 }
 
 chrome.webRequest.onBeforeRequest.addListener(
@@ -55,105 +162,13 @@ chrome.webRequest.onBeforeRequest.addListener(
 
 chrome.tabs.onRemoved.addListener((tabId) => {
 	tabRequests.delete(tabId)
-	tabLastPoll.delete(tabId)
-	debuggerFailedForTab.delete(tabId)
-	if (debuggerAttached.has(tabId)) {
-		detachDebugger(tabId)
-	}
 })
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 	if (changeInfo.url) {
 		tabRequests.delete(tabId)
-		debuggerFailedForTab.delete(tabId)
 	}
 })
-
-function getDebuggerStatus(tabId) {
-	if (!debuggerAvailable) return 'unavailable'
-	if (debuggerFailedForTab.has(tabId)) return 'failed'
-	if (debuggerAttached.has(tabId)) return 'attached'
-	return 'available'
-}
-
-function detachDebugger(tabId) {
-	if (!debuggerAvailable || !debuggerAttached.has(tabId)) return
-	try {
-		chrome.debugger.detach({ tabId })
-	} catch (e) {}
-	debuggerAttached.delete(tabId)
-}
-
-async function attachDebugger(tabId) {
-	if (!debuggerAvailable) return 'unavailable'
-	if (debuggerAttached.has(tabId)) return 'attached'
-	if (debuggerFailedForTab.has(tabId)) return 'failed'
-
-	try {
-		await new Promise((resolve, reject) => {
-			chrome.debugger.attach({ tabId }, '1.3', () => {
-				if (chrome.runtime.lastError) {
-					reject(new Error(chrome.runtime.lastError.message))
-				} else {
-					resolve()
-				}
-			})
-		})
-
-		try {
-			await new Promise((resolve, reject) => {
-				chrome.debugger.sendCommand({ tabId }, 'Network.enable', {
-					maxTotalBufferSize: 10000000,
-					maxResourceBufferSize: 5000000,
-				}, () => {
-					if (chrome.runtime.lastError) {
-						reject(new Error(chrome.runtime.lastError.message))
-					} else {
-						resolve()
-					}
-				})
-			})
-		} catch (networkErr) {
-			try {
-				chrome.debugger.detach({ tabId })
-			} catch (detachErr) {}
-			debuggerFailedForTab.add(tabId)
-			return 'failed'
-		}
-
-		debuggerAttached.add(tabId)
-		return 'attached'
-	} catch (e) {
-		debuggerFailedForTab.add(tabId)
-		return 'failed'
-	}
-}
-
-if (debuggerAvailable) {
-	chrome.debugger.onEvent.addListener((source, method, params) => {
-		if (method === 'Network.requestWillBeSent') {
-			const tabId = source.tabId
-			if (!tabId || !params.request?.url) return
-			recordRequest(tabId, params.request.url)
-		}
-	})
-
-	chrome.debugger.onDetach.addListener((source, reason) => {
-		const tabId = source.tabId
-		if (tabId) {
-			debuggerAttached.delete(tabId)
-		}
-	})
-
-	cleanupTimer = setInterval(() => {
-		const now = Date.now()
-		for (const [tabId, lastPoll] of tabLastPoll) {
-			if (now - lastPoll > CLEANUP_INTERVAL && debuggerAttached.has(tabId)) {
-				detachDebugger(tabId)
-			}
-		}
-	}, CLEANUP_INTERVAL)
-}
 
 async function mihomoFetch(url, secret, path, options = {}) {
 	let baseUrl = url.trim()
@@ -177,90 +192,87 @@ function addSnapshot(data) {
 
 function getMergedGroups(tabId) {
 	const now = Date.now()
+	cleanupRequests(now)
 
-	const currentTabDomains = new Map()
-	const domainMap = tabRequests.get(tabId)
-	if (domainMap) {
-		for (const [host, entry] of domainMap) {
-			if (now - entry.lastSeen < REQUEST_TTL) {
-				currentTabDomains.set(host, entry)
-			}
-		}
-	}
-
-	for (const [tid, dm] of tabRequests) {
-		for (const [host, entry] of dm) {
-			if (now - entry.lastSeen >= REQUEST_TTL) {
-				dm.delete(host)
-			}
-		}
-	}
-
-	if (currentTabDomains.size === 0) return { total: 0, groups: [], status: 'no_domain', debuggerStatus: getDebuggerStatus(tabId) }
-	if (cachedSnapshots.length === 0) return { total: 0, groups: [], status: 'fetching', debuggerStatus: getDebuggerStatus(tabId) }
+	const currentTabRequests = getTabRequests(tabId, now)
+	if (currentTabRequests.length === 0) return { total: 0, groups: [], status: 'no_domain' }
+	if (cachedSnapshots.length === 0) return { total: 0, groups: [], status: 'fetching' }
 
 	const allConns = new Map()
 
 	for (const snap of cachedSnapshots) {
 		const conns = snap.data.connections || []
 		for (const c of conns) {
-			const host = c.metadata?.host || c.metadata?.sniffHost || ''
+			const host = normalizeHost(c.metadata?.host || c.metadata?.sniffHost || '')
 			if (!host) continue
+			const selfMatch = scoreConnectionAgainstRequests(c, currentTabRequests, now)
+			if (selfMatch.score <= 0) continue
 
-			let matchedDomain = ''
-			for (const d of currentTabDomains.keys()) {
-				if (host === d || host.endsWith('.' + d) || host === d.replace(/^www\./, '')) {
-					matchedDomain = d
-					break
-				}
-			}
-			if (!matchedDomain) continue
-
-			const selfEntry = currentTabDomains.get(matchedDomain)
-			const selfTime = selfEntry ? selfEntry.lastSeen : 0
-
+			let bestOtherScore = 0
 			let bestOtherTime = 0
 			let bestOtherTabId = 0
-			for (const [tid, dm] of tabRequests) {
+			for (const [tid, requests] of tabRequests) {
 				if (tid === tabId) continue
-				const entry = dm.get(matchedDomain)
-				if (entry && entry.lastSeen > bestOtherTime) {
-					bestOtherTime = entry.lastSeen
+				const otherMatch = scoreConnectionAgainstRequests(c, requests, now)
+				if (
+					otherMatch.score > bestOtherScore ||
+					(otherMatch.score === bestOtherScore && otherMatch.requestTs > bestOtherTime)
+				) {
+					bestOtherScore = otherMatch.score
+					bestOtherTime = otherMatch.requestTs
 					bestOtherTabId = tid
 				}
 			}
 
-			const owned = selfTime >= bestOtherTime
-			const shared = selfTime > 0 && bestOtherTime > 0 && Math.abs(selfTime - bestOtherTime) < CORRELATION_WINDOW
+			const shared = bestOtherScore > 0
+				&& Math.abs(selfMatch.score - bestOtherScore) <= SHARED_SCORE_DELTA
+				&& Math.abs(selfMatch.requestTs - bestOtherTime) < CORRELATION_WINDOW
+			const owned = selfMatch.score >= bestOtherScore + WINNING_SCORE_DELTA || (selfMatch.score > 0 && bestOtherScore === 0)
 
 			if (!owned && !shared) continue
 
 			const rule = c.rule || ''
-			const key = `${host}\0${rule}`
+			const destinationPort = String(c.metadata?.destinationPort || '')
+			const key = `${host}\0${destinationPort}\0${rule}`
 			if (!allConns.has(key)) {
 				const chain = c.chains || c.chain || []
 				allConns.set(key, {
 					host,
+					destinationPort,
 					rule,
 					count: 0,
 					chain: Array.isArray(chain) ? chain : [],
 					rulePayload: c.rulePayload || '',
-					owned,
-					shared,
+					owned: false,
+					shared: false,
 					otherTabId: bestOtherTabId,
+					score: selfMatch.score,
+					confidence: getConfidenceLabel(selfMatch.score),
+					portMatched: selfMatch.portMatched,
 				})
 			}
-			allConns.get(key).count++
+			const group = allConns.get(key)
+			group.count++
+			group.owned = group.owned || owned
+			group.shared = group.shared || shared
+			group.otherTabId = group.otherTabId || bestOtherTabId
+			if (selfMatch.score > group.score) {
+				group.score = selfMatch.score
+				group.confidence = getConfidenceLabel(selfMatch.score)
+				group.portMatched = selfMatch.portMatched
+			}
 		}
 	}
 
-	const groups = Array.from(allConns.values()).sort((a, b) => b.count - a.count)
+	const groups = Array.from(allConns.values()).sort((a, b) => {
+		if (b.score !== a.score) return b.score - a.score
+		return b.count - a.count
+	})
 
 	return {
 		total: groups.reduce((s, g) => s + g.count, 0),
 		groups,
 		status: 'connected',
-		debuggerStatus: getDebuggerStatus(tabId),
 	}
 }
 
@@ -385,7 +397,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 	if (msg.type === 'POLL') {
 		;(async () => {
 			const tabId = msg.tabId || 0
-			tabLastPoll.set(tabId, Date.now())
 
 			if (tabId > 0 && !tabRequests.has(tabId)) {
 				try {
@@ -397,21 +408,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 				} catch {}
 			}
 
-			if (tabId > 0 && config.url) {
-				attachDebugger(tabId).catch(() => {})
-			}
-
 			const data = getMergedGroups(tabId)
 			await ensureProxyGroups()
 			sendResponse({ data, proxyGroups })
 		})()
 		return true
 	} else if (msg.type === 'POLL_STOP') {
-		const tabId = msg.tabId || 0
-		tabLastPoll.delete(tabId)
-		if (debuggerAttached.has(tabId)) {
-			detachDebugger(tabId)
-		}
 		sendResponse({ ok: true })
 		return false
 	} else if (msg.type === 'REFRESH_PROXY') {

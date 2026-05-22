@@ -108,7 +108,7 @@ function createZip(sourceDir, outFile) {
 		cdEntry.writeUInt16LE(0, pos); pos += 2
 		cdEntry.writeUInt16LE(0, pos); pos += 2
 		cdEntry.writeUInt16LE(0, pos); pos += 2
-		cdEntry.writeUInt32LE(0, pos); pos += 4
+		cdEntry.writeUInt16LE(0, pos); pos += 2
 		cdEntry.writeUInt32LE(crc, pos); pos += 4
 		cdEntry.writeUInt32LE(content.length, pos); pos += 4
 		cdEntry.writeUInt32LE(content.length, pos); pos += 4
