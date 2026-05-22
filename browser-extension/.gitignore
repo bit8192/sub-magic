@@ -1,3 +1,4 @@
 .env
 .amo-upload-uuid
 /web-ext-artifacts
+icons/icon.svg

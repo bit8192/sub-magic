@@ -19,6 +19,21 @@ copyDir(path.join(extDir, 'src'), path.join(distChrome, 'src'))
 copyDir(path.join(extDir, 'icons'), path.join(distChrome, 'icons'))
 const chromeManifest = { ...baseManifest }
 delete chromeManifest.browser_specific_settings
+chromeManifest.icons = {
+  16: 'icons/icon-16.png',
+  48: 'icons/icon-48.png',
+  128: 'icons/icon-128.png'
+}
+if (chromeManifest.action) {
+  chromeManifest.action = {
+    ...chromeManifest.action,
+    default_icon: {
+      16: 'icons/icon-16.png',
+      48: 'icons/icon-48.png',
+      128: 'icons/icon-128.png'
+    }
+  }
+}
 if (chromeManifest.background && chromeManifest.background.scripts) {
   chromeManifest.background = {
     service_worker: chromeManifest.background.scripts[0]

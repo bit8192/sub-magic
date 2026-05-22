@@ -3,9 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "build:extension": "cd browser-extension && node scripts/build.js",
+    "build:extension": "node scripts/sync-icons.js && cd browser-extension && node scripts/build.js",
     "deploy": "npm run build:extension && wrangler deploy",
     "dev": "wrangler dev",
+    "sync:icons": "node scripts/sync-icons.js",
     "start": "wrangler dev",
     "test": "vitest",
     "cf-typegen": "wrangler types"
