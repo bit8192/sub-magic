@@ -1,9 +1,7 @@
 import { parseConfig, serializeConfig, type ClashConfig } from './yaml'
 
 const KV_CONFIG_KEY = 'config'
-const KV_LEGACY_ACCESS_KEY = 'access_key'
 const KV_SUBSCRIPTION_KEY = 'subscription_key'
-const KV_SUBSCRIPTION_KEY_HASH = 'subscription_key_hash'
 const KV_API_KEY_HASH = 'api_key_hash'
 
 function kv(env: Env): KVNamespace | null {
@@ -30,30 +28,6 @@ export async function getParsedConfig(env: Env): Promise<ClashConfig> {
 
 export async function saveParsedConfig(env: Env, config: ClashConfig): Promise<void> {
   await saveConfig(env, serializeConfig(config))
-}
-
-export async function getLegacyAccessKey(env: Env): Promise<string | null> {
-  const ns = kv(env)
-  if (!ns) return null
-  return await ns.get(KV_LEGACY_ACCESS_KEY)
-}
-
-export async function deleteLegacyAccessKey(env: Env): Promise<void> {
-  const ns = kv(env)
-  if (!ns) return
-  await ns.delete(KV_LEGACY_ACCESS_KEY)
-}
-
-export async function getSubscriptionKeyHash(env: Env): Promise<string | null> {
-  const ns = kv(env)
-  if (!ns) return null
-  return await ns.get(KV_SUBSCRIPTION_KEY_HASH)
-}
-
-export async function setSubscriptionKeyHash(env: Env, keyHash: string): Promise<void> {
-  const ns = kv(env)
-  if (!ns) return
-  await ns.put(KV_SUBSCRIPTION_KEY_HASH, keyHash)
 }
 
 export async function getSubscriptionKey(env: Env): Promise<string | null> {

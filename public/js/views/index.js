@@ -16,17 +16,16 @@ export async function renderDashboard(container) {
 		versionCount = versions.length
 	} catch { /* ignore */ }
 
-	const visibleSubscriptionKey = keyRes.subscriptionKey || keyRes.legacySharedKey || ''
-	const visibleApiKey = keyRes.apiKey || keyRes.legacySharedKey || ''
+	const visibleSubscriptionKey = keyRes.subscriptionKey || ''
+	const visibleApiKey = keyRes.apiKey || ''
 	const subUrl = visibleSubscriptionKey ? `${location.origin}/sub/${visibleSubscriptionKey}` : ''
-	const isLegacyShared = !!keyRes.legacySharedKeyPresent
 	const subscriptionVisible = !!visibleSubscriptionKey
 	const apiVisible = !!visibleApiKey
 	const subscriptionPresent = !!keyRes.subscriptionKeyPresent
 	const apiPresent = !!keyRes.apiKeyPresent
 	const subscriptionHint = subscriptionVisible
 		? ''
-		: (subscriptionPresent ? '当前订阅 Key 来自旧哈希存储或旧共享 Key；如需长期可见，请轮换生成新的独立订阅 Key。' : '尚未生成订阅 Key。')
+		: '尚未生成订阅 Key。'
 	const apiHint = apiVisible
 		? ''
 		: (apiPresent ? '服务端仅保存哈希，现有 API Key 不可回显；如需查看，请轮换生成新 Key。' : '尚未生成 API Key。')
@@ -45,11 +44,6 @@ export async function renderDashboard(container) {
 	}
 
 		container.innerHTML = `
-		${isLegacyShared ? `
-		<div class="card">
-			<h2>安全提示</h2>
-			<p style="color:var(--warning);font-size:13px;line-height:1.7">当前仍在使用旧的共享 Key。它同时用于订阅和插件接口，建议尽快分别轮换为独立的订阅 Key 和 API Key。</p>
-		</div>` : ''}
 		<div class="card">
 			<h2>订阅链接</h2>
 			<p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">订阅客户端只应使用订阅 Key。${subscriptionHint}</p>

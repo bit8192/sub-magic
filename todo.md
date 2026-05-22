@@ -10,7 +10,7 @@
 - [x] **更新 worker-configuration.d.ts**
   - `npm run cf-typegen` 重新生成类型
 - [x] **初始化 KV 配置**
-  - `src/config.ts` 中 `initConfigIfEmpty` 在 Worker 启动时自动写入默认配置和 access_key
+  - `src/config.ts` 中 `initConfigIfEmpty` 在 Worker 启动时自动写入默认配置
 
 ## 2. 后端核心功能 ✅
 
@@ -25,8 +25,8 @@
 ### 2.2 认证模块 (`src/auth.ts`) ✅
 
 - [x] `verifyPassword(env, password)` - 常量时间比较验证密码
-- [x] `generateAccessKey()` - 生成随机订阅 key (UUID)
-- [x] `verifyAccessKey(env, key)` - 验证订阅 key
+- [x] `generateSubscriptionKey()` / `generateApiKey()` - 生成独立订阅 key 与 API key
+- [x] `verifySubscriptionKey(env, key)` / `verifyApiKey(env, key)` - 分别校验订阅 key 与 API key
 - [x] Session 管理: Cookie-based, 7 天有效期, KV 存储
 
 ### 2.3 API 路由 (`src/api.ts`) ✅

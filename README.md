@@ -40,7 +40,8 @@ Cloudflare Worker
         ▼
 Cloudflare KV
   ├─ config
-  ├─ access_key
+  ├─ subscription_key
+  ├─ api_key_hash
   ├─ session:*
   └─ versions:*
 ```

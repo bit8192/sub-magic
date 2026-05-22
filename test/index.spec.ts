@@ -335,23 +335,4 @@ describe("API endpoints", () => {
     expect(res.headers.get("Access-Control-Allow-Headers")).toContain("authorization")
   })
 
-  it("supports legacy shared key during migration", async () => {
-    await env.SUB_MAGIC.delete("subscription_key_hash")
-    await env.SUB_MAGIC.delete("subscription_key")
-    await env.SUB_MAGIC.delete("api_key_hash")
-    await env.SUB_MAGIC.put("access_key", "legacy_shared_key")
-
-    const subRes = await SELF.fetch("http://example.com/sub/legacy_shared_key")
-    expect(subRes.status).toBe(200)
-
-    const apiRes = await SELF.fetch("http://example.com/api/rules/add", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer legacy_shared_key",
-      },
-      body: JSON.stringify({ rule: "DOMAIN-SUFFIX,legacy.example,Proxy" }),
-    })
-    expect(apiRes.status).toBe(200)
-  })
 })

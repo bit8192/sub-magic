@@ -1,11 +1,8 @@
 import {
-  deleteLegacyAccessKey,
   getApiKeyHash,
   getConfig,
-  getLegacyAccessKey,
   getParsedConfig,
   getSubscriptionKey,
-  getSubscriptionKeyHash,
   saveConfig,
   getConfigVersions, getConfigVersion, saveConfigVersion,
   restoreConfigVersion, deleteConfigVersion,
@@ -397,34 +394,29 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
   if (path === '/api/access-key') {
     if (method === 'GET') {
       const subscriptionKey = await getSubscriptionKey(env)
-      const subscriptionKeyHash = await getSubscriptionKeyHash(env)
       const apiKeyHash = await getApiKeyHash(env)
-      const legacySharedKey = await getLegacyAccessKey(env)
 
       let generatedSubscriptionKey: string | null = null
       let generatedApiKey: string | null = null
 
-      if (!subscriptionKey && !subscriptionKeyHash && !legacySharedKey) {
+      if (!subscriptionKey) {
         generatedSubscriptionKey = await generateSubscriptionKey(env)
       }
-      if (!apiKeyHash && !legacySharedKey) {
+      if (!apiKeyHash) {
         generatedApiKey = await generateApiKey(env)
       }
 
       return json({
         subscriptionKey: subscriptionKey || generatedSubscriptionKey,
         apiKey: generatedApiKey,
-        subscriptionKeyPresent: !!(subscriptionKey || subscriptionKeyHash || legacySharedKey || generatedSubscriptionKey),
-        apiKeyPresent: !!(apiKeyHash || legacySharedKey || generatedApiKey),
-        legacySharedKey: legacySharedKey ? legacySharedKey : null,
-        legacySharedKeyPresent: !!legacySharedKey,
+        subscriptionKeyPresent: !!(subscriptionKey || generatedSubscriptionKey),
+        apiKeyPresent: !!(apiKeyHash || generatedApiKey),
       }, 200, { 'Cache-Control': 'no-store' })
     }
 
     if (method === 'POST') {
       const newSubscriptionKey = await generateSubscriptionKey(env)
       const newApiKey = await generateApiKey(env)
-      await deleteLegacyAccessKey(env)
       return json({
         subscriptionKey: newSubscriptionKey,
         apiKey: newApiKey,
@@ -438,23 +430,16 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 
     if (target === 'subscription') {
       const subscriptionKey = await generateSubscriptionKey(env)
-      if (await getApiKeyHash(env)) {
-        await deleteLegacyAccessKey(env)
-      }
       return json({ subscriptionKey }, 200, { 'Cache-Control': 'no-store' })
     }
 
     if (target === 'api') {
       const apiKey = await generateApiKey(env)
-      if (await getSubscriptionKey(env) || await getSubscriptionKeyHash(env)) {
-        await deleteLegacyAccessKey(env)
-      }
       return json({ apiKey }, 200, { 'Cache-Control': 'no-store' })
     }
 
     const subscriptionKey = await generateSubscriptionKey(env)
     const apiKey = await generateApiKey(env)
-    await deleteLegacyAccessKey(env)
     return json({ subscriptionKey, apiKey }, 200, { 'Cache-Control': 'no-store' })
   }
 

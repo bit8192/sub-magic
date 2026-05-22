@@ -1,8 +1,6 @@
 import {
   getApiKeyHash,
-  getLegacyAccessKey,
   getSubscriptionKey,
-  getSubscriptionKeyHash,
   setApiKeyHash,
   setSubscriptionKey,
 } from './config'
@@ -130,26 +128,14 @@ export async function generateApiKey(env: Env): Promise<string> {
 
 export async function verifySubscriptionKey(env: Env, key: string): Promise<boolean> {
   const storedKey = await getSubscriptionKey(env)
-  if (storedKey) {
-    return timingSafeEqual(storedKey, key)
-  }
-  const legacyHash = await getSubscriptionKeyHash(env)
-  if (legacyHash) {
-    return timingSafeEqual(legacyHash, await hashKey(key))
-  }
-  const legacy = await getLegacyAccessKey(env)
-  if (!legacy) return false
-  return timingSafeEqual(legacy, key)
+  if (!storedKey) return false
+  return timingSafeEqual(storedKey, key)
 }
 
 export async function verifyApiKey(env: Env, key: string): Promise<boolean> {
   const storedHash = await getApiKeyHash(env)
-  if (storedHash) {
-    return timingSafeEqual(storedHash, await hashKey(key))
-  }
-  const legacy = await getLegacyAccessKey(env)
-  if (!legacy) return false
-  return timingSafeEqual(legacy, key)
+  if (!storedHash) return false
+  return timingSafeEqual(storedHash, await hashKey(key))
 }
 
 export async function requireAccessKey(request: Request, env: Env): Promise<Response | null> {
