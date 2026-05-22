@@ -156,7 +156,7 @@ export function generateAutoScript() {
 	if (platform === 'windows') {
 		if (modeSelect) modeSelect.disabled = true
 		installCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "& { Invoke-WebRequest -UseBasicParsing '${location.origin}/install.ps1' -OutFile ([IO.Path]::Combine([IO.Path]::GetTempPath(),'sub-magic-install.ps1')); & ([IO.Path]::Combine([IO.Path]::GetTempPath(),'sub-magic-install.ps1')) -ConfigPath '${toPwshSingleQuoted(configPath)}' -SubUrl '${toPwshSingleQuoted(subUrl)}' }"`
-		uninstallCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "Unregister-ScheduledTask -TaskName 'sub-magic' -Confirm:$false -ErrorAction SilentlyContinue; Remove-Item -LiteralPath '.\\sub-magic.ps1' -Force -ErrorAction SilentlyContinue"`
+		uninstallCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "Unregister-ScheduledTask -TaskName 'sub-magic' -Confirm:$false -ErrorAction SilentlyContinue; Remove-Item -LiteralPath '.\\sub-magic.ps1' -Force -ErrorAction SilentlyContinue; if (Test-Path '.\\mihomo-service.exe') { & '.\\mihomo-service.exe' stop 2>&1 | Out-Null; & '.\\mihomo-service.exe' uninstall 2>&1 | Out-Null }"`
 	} else {
 		if (modeSelect) modeSelect.disabled = false
 		installCmd = isRoot

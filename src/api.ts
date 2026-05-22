@@ -83,6 +83,55 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     return corsPreflight(request)
   }
 
+  // GitHub Release proxy: get latest release info (no auth required, used by install scripts)
+  if (path === '/api/proxy/github/release' && method === 'GET') {
+    const repo = url.searchParams.get('repo') || ''
+    if (!/^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(repo)) {
+      return json({ error: 'Invalid repo' }, 400)
+    }
+    const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`
+    try {
+      const ghResp = await fetch(apiUrl, {
+        headers: { 'User-Agent': 'sub-magic-worker', Accept: 'application/vnd.github+json' },
+      })
+      if (!ghResp.ok) {
+        return json({ error: `GitHub API returned ${ghResp.status}` }, 502)
+      }
+      const release = (await ghResp.json()) as Record<string, unknown>
+      const workerOrigin = url.origin
+      if (Array.isArray(release.assets)) {
+        for (const asset of release.assets as Array<Record<string, unknown>>) {
+          if (typeof asset.browser_download_url === 'string') {
+            asset.browser_download_url = `${workerOrigin}/api/proxy/github/download?url=${encodeURIComponent(asset.browser_download_url)}`
+          }
+        }
+      }
+      return json(release)
+    } catch {
+      return json({ error: 'Failed to fetch release info' }, 502)
+    }
+  }
+
+  // GitHub Download proxy: stream a release asset (no auth required, used by install scripts)
+  if (path === '/api/proxy/github/download' && method === 'GET') {
+    const downloadUrl = url.searchParams.get('url') || ''
+    if (!downloadUrl.startsWith('https://github.com/')) {
+      return json({ error: 'Invalid download URL' }, 400)
+    }
+    try {
+      const ghResp = await fetch(downloadUrl, {
+        headers: { 'User-Agent': 'sub-magic-worker' },
+        redirect: 'follow',
+      })
+      return new Response(ghResp.body, {
+        status: ghResp.status,
+        headers: ghResp.headers,
+      })
+    } catch {
+      return json({ error: 'Failed to fetch asset' }, 502)
+    }
+  }
+
   // Subscription endpoint (no auth required)
   if (method === 'GET' && path.startsWith('/sub/')) {
     const key = path.slice(5)

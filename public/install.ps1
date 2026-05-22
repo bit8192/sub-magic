@@ -76,16 +76,32 @@ function Get-LocalMihomoExe {
 	return ($candidates | Select-Object -First 1).FullName
 }
 
-function Get-WindowsAssetPatterns {
+function Get-WindowsArch {
 	$arch = $env:PROCESSOR_ARCHITEW6432
 	if ([string]::IsNullOrWhiteSpace($arch)) {
 		$arch = $env:PROCESSOR_ARCHITECTURE
 	}
 
 	switch -Regex ($arch) {
-		'ARM64' { return @('windows-arm64') }
-		'86' { return @('windows-386') }
+		'ARM64' { return 'arm64' }
+		'86' { return '386' }
+		default { return 'amd64' }
+	}
+}
+
+function Get-MihomoAssetPatterns {
+	switch (Get-WindowsArch) {
+		'arm64' { return @('windows-arm64') }
+		'386' { return @('windows-386') }
 		default { return @('windows-amd64-compatible', 'windows-amd64') }
+	}
+}
+
+function Get-WinSWAssetPatterns {
+	switch (Get-WindowsArch) {
+		'arm64' { return @('WinSW-arm64.exe', 'WinSW-net461arm64.exe') }
+		'386' { return @('WinSW-x86.exe', 'WinSW-net461.exe') }
+		default { return @('WinSW-x64.exe', 'WinSW-net461x64.exe') }
 	}
 }
 
@@ -95,20 +111,16 @@ function Escape-PowerShellSingleQuoted {
 }
 
 function Get-LatestMihomoAsset {
-	$releaseApi = 'https://api.github.com/repos/MetaCubeX/mihomo/releases/latest'
-	$headers = @{
-		'User-Agent' = 'sub-magic-installer'
-		'Accept' = 'application/vnd.github+json'
-	}
+	param([string]$BaseUrl)
 
 	Write-Step '正在解析 Mihomo 最新 Windows 发布信息'
-	$release = Invoke-RestMethod -Uri $releaseApi -Headers $headers
-	if (-not $release.assets) {
+	$releaseJson = Invoke-RestMethod -Uri "$BaseUrl/api/proxy/github/release?repo=MetaCubeX/mihomo"
+	if (-not $releaseJson.assets) {
 		throw 'GitHub Releases 未返回可下载资产。'
 	}
 
-	foreach ($pattern in Get-WindowsAssetPatterns) {
-		$asset = $release.assets | Where-Object {
+	foreach ($pattern in Get-MihomoAssetPatterns) {
+		$asset = $releaseJson.assets | Where-Object {
 			$_.name -like "*$pattern*.zip"
 		} | Select-Object -First 1
 		if ($asset) {
@@ -119,16 +131,40 @@ function Get-LatestMihomoAsset {
 	throw '未找到匹配当前 Windows 架构的 Mihomo 压缩包。'
 }
 
-function Download-MihomoExe {
-	param([string]$TargetDirectory)
+function Get-LatestWinSWAsset {
+	param([string]$BaseUrl)
 
-	$asset = Get-LatestMihomoAsset
+	Write-Step '正在解析 WinSW 最新 Windows 发布信息'
+	$releaseJson = Invoke-RestMethod -Uri "$BaseUrl/api/proxy/github/release?repo=winsw/winsw"
+	if (-not $releaseJson.assets) {
+		throw 'WinSW GitHub Releases 未返回可下载资产。'
+	}
+
+	foreach ($pattern in Get-WinSWAssetPatterns) {
+		$asset = $releaseJson.assets | Where-Object {
+			$_.name -eq $pattern
+		} | Select-Object -First 1
+		if ($asset) {
+			return $asset
+		}
+	}
+
+	throw '未找到匹配当前 Windows 架构的 WinSW 可执行文件。'
+}
+
+function Download-MihomoExe {
+	param(
+		[string]$TargetDirectory,
+		[string]$BaseUrl
+	)
+
+	$asset = Get-LatestMihomoAsset -BaseUrl $BaseUrl
 	$tempZip = Join-Path $env:TEMP $asset.name
 	$extractDir = Join-Path $env:TEMP ("sub-magic-mihomo-" + [guid]::NewGuid().ToString('N'))
 
 	try {
 		Write-Step "下载 $($asset.name)"
-		Invoke-WebRequest -Uri $asset.browser_download_url -Headers @{ 'User-Agent' = 'sub-magic-installer' } -OutFile $tempZip
+		Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tempZip
 
 		Write-Step '解压 Mihomo 压缩包'
 		Expand-Archive -LiteralPath $tempZip -DestinationPath $extractDir -Force
@@ -154,6 +190,21 @@ function Download-MihomoExe {
 	}
 }
 
+function Download-WinSWExe {
+	param(
+		[string]$TargetDirectory,
+		[string]$BaseUrl
+	)
+
+	$asset = Get-LatestWinSWAsset -BaseUrl $BaseUrl
+	$targetExe = Join-Path $TargetDirectory 'mihomo-service.exe'
+
+	Write-Step "下载 WinSW $($asset.name)"
+	Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $targetExe
+	Write-Step "WinSW 已保存到 $targetExe"
+	return $targetExe
+}
+
 function Install-MihomoService {
 	param(
 		[string]$ExePath,
@@ -166,28 +217,56 @@ function Install-MihomoService {
 	}
 
 	$serviceName = 'mihomo'
-	$displayName = 'Mihomo Service'
-	$binPath = "`"$ExePath`" -d `"$configDir`""
+	$workDir = (Get-Location).Path
+	$winswExe = Join-Path $workDir 'mihomo-service.exe'
+	$winswXml = Join-Path $workDir 'mihomo-service.xml'
 
 	$existing = Get-MihomoService
 	if ($existing) {
 		Write-Step "发现已存在的服务: $($existing.Name)，正在移除..."
 		Stop-Service -Name $existing.Name -Force -ErrorAction SilentlyContinue
+		if ($existing.PathName -match 'mihomo-service\.exe') {
+			$oldExe = $existing.PathName.Trim('"')
+			if (Test-Path -LiteralPath $oldExe) {
+				& $oldExe uninstall 2>&1 | Out-Null
+			}
+		}
 		sc.exe delete $existing.Name
 		if ($LASTEXITCODE -ne 0) {
-			throw "无法移除现有服务: $($existing.Name)"
+			Write-Warning "sc.exe delete 返回 $LASTEXITCODE，继续..."
 		}
 		Start-Sleep -Seconds 2
 	}
 
-	Write-Step "创建服务 $serviceName"
-	New-Service -Name $serviceName -DisplayName $displayName -BinaryPathName $binPath -StartupType Automatic
-	if (-not $?) {
-		throw "New-Service 创建失败"
+	Write-Step "生成 WinSW 配置 $winswXml"
+	$xml = @"
+<service>
+  <id>mihomo</id>
+  <name>Mihomo Service</name>
+  <description>Mihomo Proxy Service</description>
+  <executable>$ExePath</executable>
+  <arguments>-d "$configDir"</arguments>
+  <workingdirectory>$workDir</workingdirectory>
+  <logmode>roll</logmode>
+  <onfailure action="restart" delay="10 sec" />
+  <onfailure action="restart" delay="20 sec" />
+  <onfailure action="none" delay="30 sec" />
+  <resetfailure>1 hour</resetfailure>
+</service>
+"@
+	[System.IO.File]::WriteAllText($winswXml, $xml, [System.Text.UTF8Encoding]::new($false))
+
+	Write-Step "注册服务 $serviceName"
+	& $winswExe install
+	if ($LASTEXITCODE -ne 0) {
+		throw "WinSW install 失败，退出码: $LASTEXITCODE"
 	}
 
 	Write-Step "启动服务 $serviceName"
-	Start-Service -Name $serviceName
+	& $winswExe start
+	if ($LASTEXITCODE -ne 0) {
+		throw "WinSW start 失败，退出码: $LASTEXITCODE"
+	}
 }
 
 function Install-UpdateScript {
@@ -288,8 +367,8 @@ if ($mihomoService) {
 	$mihomoExePath = Get-LocalMihomoExe -Directory $workDir
 
 	if (-not $mihomoExePath) {
-		if (Confirm-Action -Message '当前目录未找到 Mihomo 可执行程序，是否尝试从 https://github.com/MetaCubeX/mihomo/releases 下载当前 Windows 平台最新版本？') {
-			$mihomoExePath = Download-MihomoExe -TargetDirectory $workDir
+		if (Confirm-Action -Message '当前目录未找到 Mihomo 可执行程序，是否尝试通过 Cloudflare Worker 代理下载？') {
+			$mihomoExePath = Download-MihomoExe -TargetDirectory $workDir -BaseUrl $baseUrl
 		} else {
 			Write-Warning '已跳过 Mihomo 下载。'
 		}
@@ -298,6 +377,11 @@ if ($mihomoService) {
 	}
 
 	if ($mihomoExePath -and (Confirm-Action -Message '是否现在安装 Mihomo 服务？')) {
+		$winswExe = Join-Path $workDir 'mihomo-service.exe'
+		if (-not (Test-Path -LiteralPath $winswExe)) {
+			Write-Step '正在下载 WinSW 服务包装器'
+			$null = Download-WinSWExe -TargetDirectory $workDir -BaseUrl $baseUrl
+		}
 		Install-MihomoService -ExePath $mihomoExePath -ConfigFilePath $ConfigPath
 	}
 }

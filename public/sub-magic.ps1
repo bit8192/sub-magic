@@ -38,11 +38,31 @@ function Get-RuntimeConfigPath {
 	if (-not $match.Success) {
 		$match = [regex]::Match($pathName, '(?:^|\s)-d\s+([^\s"]+)')
 	}
-	if (-not $match.Success) {
-		return $null
+	if ($match.Success) {
+		return Join-Path $match.Groups[1].Value 'config.yaml'
 	}
 
-	return Join-Path $match.Groups[1].Value 'config.yaml'
+	$winswExe = $pathName.Trim('"')
+	if ($winswExe -match 'mihomo-service\.exe$') {
+		$winswXml = $winswExe -replace '\.exe$', '.xml'
+		if (Test-Path -LiteralPath $winswXml) {
+			try {
+				[xml]$doc = Get-Content -LiteralPath $winswXml -Raw
+				$arguments = $doc.service.arguments
+				if ($arguments) {
+					$argMatch = [regex]::Match($arguments, '-d\s+"([^"]+)"')
+					if (-not $argMatch.Success) {
+						$argMatch = [regex]::Match($arguments, '-d\s+([^\s"]+)')
+					}
+					if ($argMatch.Success) {
+						return Join-Path $argMatch.Groups[1].Value 'config.yaml'
+					}
+				}
+			} catch {}
+		}
+	}
+
+	return $null
 }
 
 function Sync-RuntimeConfig {
