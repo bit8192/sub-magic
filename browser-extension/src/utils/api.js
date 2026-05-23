@@ -88,6 +88,10 @@ function normalizeRuleType(type) {
 		DomainKeyword: 'DOMAIN-KEYWORD',
 		GeoSite: 'GEOSITE',
 		GeoIP: 'GEOIP',
+		InPort: 'IN-PORT',
+		InType: 'IN-TYPE',
+		InUser: 'IN-USER',
+		InName: 'IN-NAME',
 		IPCIDR: 'IP-CIDR',
 		SrcIPCIDR: 'SRC-IP-CIDR',
 		RuleSet: 'RULE-SET',
@@ -99,6 +103,10 @@ function normalizeRuleType(type) {
 	const upper = type.toUpperCase()
 	if (upper === 'IPCIDR') return 'IP-CIDR'
 	if (upper === 'SRCIPCIDR') return 'SRC-IP-CIDR'
+	if (upper === 'INPORT') return 'IN-PORT'
+	if (upper === 'INTYPE') return 'IN-TYPE'
+	if (upper === 'INUSER') return 'IN-USER'
+	if (upper === 'INNAME') return 'IN-NAME'
 	return upper
 }
 
@@ -126,6 +134,19 @@ function ruleEntryToString(ruleEntry) {
 
 function normalizeRules(rules) {
 	return (rules || []).map(ruleEntryToString).filter(Boolean)
+}
+
+function getInsertIndex(currentRules, previousRule = '') {
+	if (!previousRule) return 0
+	const previousIdx = currentRules.indexOf(previousRule)
+	return previousIdx === -1 ? currentRules.length : previousIdx + 1
+}
+
+function isRulePrioritySatisfied(currentRules, ruleStr, previousRule = '') {
+	const ruleIdx = currentRules.indexOf(ruleStr)
+	if (ruleIdx === -1) return false
+	if (!previousRule) return ruleIdx === 0
+	return ruleIdx > 0 && currentRules[ruleIdx - 1] === previousRule
 }
 
 export function parseRuleDisplay(ruleStr) {
@@ -193,11 +214,14 @@ export function monitorConnections(mihomoUrl, secret, domain, onUpdate, onError)
 	}
 }
 
-export async function addRuleLocal(mihomoUrl, secret, ruleStr) {
+export async function getLocalRules(mihomoUrl, secret) {
 	const rulesRes = await mihomoFetch(mihomoUrl, secret, '/rules')
-	const currentRules = normalizeRules(rulesRes.rules)
+	return normalizeRules(rulesRes.rules)
+}
 
-	const insertIdx = currentRules.length > 0 ? currentRules.length - 1 : 0
+export async function addRuleLocal(mihomoUrl, secret, ruleStr, previousRule = '') {
+	const currentRules = await getLocalRules(mihomoUrl, secret)
+	const insertIdx = getInsertIndex(currentRules, previousRule)
 
 	const newRules = [...currentRules]
 	newRules.splice(insertIdx, 0, ruleStr)
@@ -270,13 +294,12 @@ export async function updateRule(mihomoUrl, secret, oldRule, newRule) {
 	return { ok: true }
 }
 
-export async function waitForRuleUpdate(mihomoUrl, secret, oldRule, newRule, maxChecks = 30, intervalMs = 1000) {
+export async function waitForRuleUpdate(mihomoUrl, secret, oldRule, newRule, previousRule = '', maxChecks = 30, intervalMs = 1000) {
 	for (let i = 0; i < maxChecks; i++) {
 		await new Promise(resolve => setTimeout(resolve, intervalMs))
-		const rulesRes = await mihomoFetch(mihomoUrl, secret, '/rules')
-		const currentRules = normalizeRules(rulesRes.rules)
-		const hasNewRule = currentRules.includes(newRule)
-		const hasOldRule = currentRules.includes(oldRule)
+		const currentRules = await getLocalRules(mihomoUrl, secret)
+		const hasNewRule = isRulePrioritySatisfied(currentRules, newRule, previousRule)
+		const hasOldRule = oldRule === newRule ? false : currentRules.includes(oldRule)
 
 		if (hasNewRule && !hasOldRule) {
 			return { ok: true, attempts: i + 1 }
@@ -286,13 +309,12 @@ export async function waitForRuleUpdate(mihomoUrl, secret, oldRule, newRule, max
 	return { ok: false, attempts: maxChecks }
 }
 
-export async function waitForRulePresent(mihomoUrl, secret, ruleStr, maxChecks = 30, intervalMs = 1000) {
+export async function waitForRulePresent(mihomoUrl, secret, ruleStr, previousRule = '', maxChecks = 30, intervalMs = 1000) {
 	for (let i = 0; i < maxChecks; i++) {
 		await new Promise(resolve => setTimeout(resolve, intervalMs))
-		const rulesRes = await mihomoFetch(mihomoUrl, secret, '/rules')
-		const currentRules = normalizeRules(rulesRes.rules)
+		const currentRules = await getLocalRules(mihomoUrl, secret)
 
-		if (currentRules.includes(ruleStr)) {
+		if (isRulePrioritySatisfied(currentRules, ruleStr, previousRule)) {
 			return { ok: true, attempts: i + 1 }
 		}
 	}
@@ -317,7 +339,7 @@ export async function deleteRule(mihomoUrl, secret, ruleStr) {
 	return { ok: true }
 }
 
-export async function addRuleRemote(subMagicUrl, accessKey, ruleStr) {
+export async function addRuleRemote(subMagicUrl, accessKey, ruleStr, previousRule = '') {
 	const baseUrl = subMagicUrl.replace(/\/+$/, '')
 	const res = await fetch(`${baseUrl}/api/rules/add`, {
 		method: 'POST',
@@ -325,7 +347,7 @@ export async function addRuleRemote(subMagicUrl, accessKey, ruleStr) {
 			'Content-Type': 'application/json',
 			Authorization: `Bearer ${accessKey}`,
 		},
-		body: JSON.stringify({ rule: ruleStr }),
+		body: JSON.stringify({ rule: ruleStr, insertAfter: previousRule }),
 	})
 
 	if (!res.ok) {
@@ -336,7 +358,7 @@ export async function addRuleRemote(subMagicUrl, accessKey, ruleStr) {
 	return res.json()
 }
 
-export async function updateRuleRemote(subMagicUrl, accessKey, oldRule, newRule) {
+export async function updateRuleRemote(subMagicUrl, accessKey, oldRule, newRule, previousRule = '') {
 	const baseUrl = subMagicUrl.replace(/\/+$/, '')
 	const res = await fetch(`${baseUrl}/api/rules/update`, {
 		method: 'POST',
@@ -344,7 +366,7 @@ export async function updateRuleRemote(subMagicUrl, accessKey, oldRule, newRule)
 			'Content-Type': 'application/json',
 			Authorization: `Bearer ${accessKey}`,
 		},
-		body: JSON.stringify({ oldRule, newRule }),
+		body: JSON.stringify({ oldRule, newRule, insertAfter: previousRule }),
 	})
 
 	if (!res.ok) {

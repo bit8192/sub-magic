@@ -125,6 +125,93 @@ async function loadProxyState() {
 	await applyProxySettings()
 }
 
+function ensureHttpUrl(url) {
+	if (!url) return ''
+	return /^https?:\/\//i.test(url) ? url : `http://${url}`
+}
+
+function getMihomoHost() {
+	try {
+		return new URL(ensureHttpUrl(config.url)).hostname
+	} catch {
+		return ''
+	}
+}
+
+function resolveConfigPortForType(profile, configs) {
+	if (profile.proxyType === 'http' || profile.proxyType === 'https') {
+		const directPort = Number(configs.port || 0)
+		const mixedPort = Number(configs['mixed-port'] || 0)
+		if (directPort > 0) return directPort
+		if (mixedPort > 0) return mixedPort
+		return 0
+	}
+
+	if (profile.proxyType === 'socks5') {
+		const directPort = Number(configs['socks-port'] || 0)
+		const mixedPort = Number(configs['mixed-port'] || 0)
+		if (directPort > 0) return directPort
+		if (mixedPort > 0) return mixedPort
+		return 0
+	}
+
+	const directPort = Number(configs['socks-port'] || 0)
+	return directPort > 0 ? directPort : 0
+}
+
+async function bootstrapProxyProfileFromMihomo(profile) {
+	const normalized = normalizeProfile(profile)
+	if (!normalized.enabled || canApplyProfile(normalized) || !config.url) {
+		return normalized
+	}
+
+	try {
+		const configs = await mihomoFetch(config.url, config.secret, '/configs')
+		const host = getMihomoHost()
+		const port = resolveConfigPortForType(normalized, configs || {})
+		if (!host || port <= 0) return normalized
+
+		return normalizeProfile({
+			...normalized,
+			host,
+			port,
+			source: 'config',
+		})
+	} catch {
+		return normalized
+	}
+}
+
+async function bootstrapProxyState() {
+	const nextGlobalProfile = await bootstrapProxyProfileFromMihomo(proxyState.globalProfile)
+	const changedGlobalProfile = JSON.stringify(nextGlobalProfile) !== JSON.stringify(proxyState.globalProfile)
+	if (changedGlobalProfile) {
+		proxyState.globalProfile = nextGlobalProfile
+	}
+
+	if (supportsIsolation) {
+		let changedTabProfiles = false
+		const nextTabProfiles = {}
+		for (const [tabId, profile] of Object.entries(proxyState.tabProfiles)) {
+			const nextProfile = await bootstrapProxyProfileFromMihomo(profile)
+			nextTabProfiles[tabId] = nextProfile
+			if (JSON.stringify(nextProfile) !== JSON.stringify(profile)) {
+				changedTabProfiles = true
+			}
+		}
+		if (changedTabProfiles) {
+			proxyState.tabProfiles = nextTabProfiles
+		}
+		if (changedGlobalProfile || changedTabProfiles) {
+			await persistProxyState()
+		}
+	} else if (changedGlobalProfile) {
+		await persistProxyState()
+	}
+
+	await applyProxySettings()
+}
+
 function buildChromeProxyConfig(profile) {
 	if (!canApplyProfile(profile)) {
 		return { mode: 'direct' }
@@ -621,6 +708,7 @@ chrome.runtime.onInstalled.addListener(() => {
 	await ensureSyncDefaults()
 	await loadConfig()
 	await loadProxyState()
+	await bootstrapProxyState()
 	if (config.url) {
 		initMonitor()
 		ensureProxyGroups()
@@ -631,6 +719,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 	if (area === 'sync' && (changes.mihomoUrl || changes.mihomoSecret)) {
 		loadConfig().then(() => {
 			if (config.url) {
+				bootstrapProxyState().catch(() => {})
 				initMonitor()
 			} else {
 				stopPolling()
@@ -643,7 +732,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 	}
 
 	if (area === 'local' && (changes.proxyGlobalState || changes.proxyTabStates)) {
-		loadProxyState().catch(() => {})
+		loadProxyState().then(() => bootstrapProxyState()).catch(() => {})
 	}
 })
 
@@ -693,12 +782,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 		;(async () => {
 			const tabId = Number(msg.tabId || 0)
 			const profile = normalizeProfile(msg.profile)
+			const shouldPersist = msg.persist !== false
 			if (supportsIsolation && proxyState.isolationEnabled && tabId > 0) {
 				proxyState.tabProfiles[String(tabId)] = profile
 			} else {
 				proxyState.globalProfile = profile
 			}
-			await persistProxyState()
+			if (shouldPersist) {
+				await persistProxyState()
+			}
 			await applyProxySettings()
 			sendResponse(serializeProxyState(tabId))
 		})()

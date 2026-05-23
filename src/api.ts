@@ -98,6 +98,23 @@ function serializeProxyAuthEntry(user: ProxyAuthUser): string {
   return `${user.username}:${user.password}`
 }
 
+function normalizeRuleArray(config: Record<string, unknown>): string[] {
+  return Array.isArray(config.rules) ? config.rules.map(rule => String(rule)) : []
+}
+
+function findMatchRuleIndex(rules: string[]): number {
+  return rules.findIndex(rule => rule.trim().toUpperCase().startsWith('MATCH'))
+}
+
+function resolveRuleInsertIndex(rules: string[], insertAfter: string): number {
+  const normalized = insertAfter.trim()
+  if (!normalized) return 0
+  const anchorIdx = rules.indexOf(normalized)
+  if (anchorIdx !== -1) return anchorIdx + 1
+  const matchIdx = findMatchRuleIndex(rules)
+  return matchIdx !== -1 ? matchIdx : rules.length
+}
+
 function getProxyAuthUsers(config: Record<string, unknown>): ProxyAuthUser[] {
   return Array.isArray(config.authentication)
     ? config.authentication.map(parseProxyAuthEntry).filter((entry): entry is ProxyAuthUser => !!entry)
@@ -207,17 +224,18 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 
     const body = await parseBody(request)
     const rule = String(body.rule || '')
+    const insertAfter = String(body.insertAfter || '')
     if (!rule) return withCors(json({ error: 'rule is required' }, 400), request)
 
     const config = await getParsedConfig(env)
-    const rules = config.rules || []
-    const matchIdx = rules.findIndex(r => r.trim().toUpperCase().startsWith('MATCH'))
-
-    if (matchIdx !== -1) {
-      rules.splice(matchIdx, 0, rule)
-    } else {
-      rules.push(rule)
-    }
+    const rules = normalizeRuleArray(config)
+    const insertIdx = insertAfter.trim()
+      ? resolveRuleInsertIndex(rules, insertAfter)
+      : (() => {
+          const matchIdx = findMatchRuleIndex(rules)
+          return matchIdx !== -1 ? matchIdx : rules.length
+        })()
+    rules.splice(insertIdx, 0, rule)
 
     config.rules = rules
     await saveConfig(env, serializeConfig(config))
@@ -231,16 +249,19 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     const body = await parseBody(request)
     const oldRule = String(body.oldRule || '')
     const newRule = String(body.newRule || '')
+    const insertAfter = String(body.insertAfter || '')
     if (!oldRule || !newRule) {
       return withCors(json({ error: 'oldRule and newRule are required' }, 400), request)
     }
 
     const config = await getParsedConfig(env)
-    const rules = config.rules || []
+    const rules = normalizeRuleArray(config)
     const idx = rules.indexOf(oldRule)
     if (idx === -1) return withCors(json({ error: 'Rule not found' }, 404), request)
 
-    rules[idx] = newRule
+    rules.splice(idx, 1)
+    const insertIdx = resolveRuleInsertIndex(rules, insertAfter)
+    rules.splice(insertIdx, 0, newRule)
     config.rules = rules
     await saveConfig(env, serializeConfig(config))
     return withCors(json({ ok: true, ruleCount: rules.length }), request)

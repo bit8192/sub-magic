@@ -9,6 +9,7 @@ import {
 	deleteRule,
 	getExternalUiConfig,
 	getListeners,
+	getLocalRules,
 	getMihomoConfigs,
 	getProxyAuthUsers,
 	getProxySnapshot,
@@ -34,6 +35,7 @@ const state = {
 	proxyGroups: [],
 	proxyMap: {},
 	proxyProviders: {},
+	localRules: [],
 	ruleMode: null,
 	editingRule: null,
 	currentSelector: '',
@@ -46,6 +48,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 	await initCurrentTab()
 	await loadSettings()
 	await loadProxyState()
+	refreshRuleTypeAvailability()
 
 	document.getElementById('btn-add-rule').addEventListener('click', handleAddRule)
 	document.getElementById('btn-save-rule').addEventListener('click', handleSaveRule)
@@ -60,6 +63,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 	document.getElementById('proxy-type').addEventListener('change', () => refreshProxyForm())
 	document.getElementById('proxy-auth-user').addEventListener('change', () => refreshProxyMeta())
 	document.getElementById('proxy-listener').addEventListener('change', () => refreshProxyForm())
+	document.getElementById('rule-priority-select').addEventListener('change', updateRulePriorityHint)
 
 	const proxySelect = document.getElementById('rule-proxy-select')
 	proxySelect.addEventListener('change', () => {
@@ -132,8 +136,8 @@ function joinExternalUiUrl(baseUrl, externalUi) {
 function openControlPanel() {
 	if (!(state.mihomo.url && state.externalUi)) return
 	const url = joinExternalUiUrl(state.mihomo.url, state.externalUi)
-	if (chrome.windows?.create) {
-		chrome.windows.create({ url, type: 'popup' })
+	if (chrome.tabs?.create) {
+		chrome.tabs.create({ url })
 		return
 	}
 	window.open(url, '_blank', 'noopener,noreferrer')
@@ -192,6 +196,10 @@ function canUseListenersFallback() {
 	return areConfigInboundPortsDisabled() && Array.isArray(state.listeners) && state.listeners.length > 0
 }
 
+function isProxyAuthUserSupported(proxyType) {
+	return !(state.browser.id === 'chrome' && (proxyType === 'socks4' || proxyType === 'socks5'))
+}
+
 function filterListenersByProxyType(proxyType) {
 	const listeners = state.listeners || []
 	if (proxyType === 'http' || proxyType === 'https') {
@@ -235,9 +243,26 @@ function resolvePortForType(proxyType, selectedListenerName = '') {
 }
 
 function getSelectedAuthUser() {
+	const proxyType = document.getElementById('proxy-type').value
+	if (!isProxyAuthUserSupported(proxyType)) return null
 	const selectedUsername = document.getElementById('proxy-auth-user').value
 	if (!selectedUsername) return null
 	return state.proxyAuthUsers.find(user => user.username === selectedUsername) || null
+}
+
+function refreshProxyAuthUserAvailability(proxyType) {
+	const select = document.getElementById('proxy-auth-user')
+	const hint = document.getElementById('proxy-auth-user-hint')
+	const supported = isProxyAuthUserSupported(proxyType)
+
+	select.disabled = !supported
+	if (!supported) {
+		select.value = ''
+		hint.textContent = 'Chrome 中选择 SOCKS4/SOCKS5 时，不支持代理认证用户。'
+		return
+	}
+
+	hint.textContent = ''
 }
 
 function buildProxyValidation(profile) {
@@ -351,6 +376,7 @@ function applyProxyProfileToForm() {
 	}
 	document.getElementById('proxy-type').value = profile.proxyType || DEFAULT_PROXY_TYPE
 	renderProxyAuthUsers()
+	refreshProxyAuthUserAvailability(profile.proxyType || DEFAULT_PROXY_TYPE)
 	renderListenerOptions(profile.proxyType || DEFAULT_PROXY_TYPE)
 	if (profile.listenerName) {
 		document.getElementById('proxy-listener').value = profile.listenerName
@@ -378,6 +404,7 @@ async function refreshProxyControls() {
 		state.mihomoConfigs = configs || {}
 		state.proxyAuthUsers = Array.isArray(authUsers) ? authUsers : []
 		state.listeners = Array.isArray(listeners) ? listeners : []
+		refreshRuleTypeAvailability()
 		if (!state.proxyProfile) {
 			state.proxyProfile = {
 				proxyType: DEFAULT_PROXY_TYPE,
@@ -408,6 +435,7 @@ async function refreshProxyControls() {
 
 function refreshProxyForm() {
 	const proxyType = document.getElementById('proxy-type').value
+	refreshProxyAuthUserAvailability(proxyType)
 	renderListenerOptions(proxyType)
 	refreshProxyMeta()
 }
@@ -504,16 +532,21 @@ async function handleApplyProxy() {
 	const profile = applied
 		? {
 			...draftProfile,
+			enabled: false,
 			host: '',
 			port: 0,
 			listenerName: '',
 			source: 'config',
 			authUser: null,
 		}
-		: draftProfile
+		: {
+			...draftProfile,
+			enabled: true,
+		}
 
 	state.proxyProfile = profile
-	await chrome.runtime.sendMessage({ type: 'PROXY_SET_STATE', tabId: state.tabId, profile })
+	const shouldPersist = !(applied && state.proxyIsolation)
+	await chrome.runtime.sendMessage({ type: 'PROXY_SET_STATE', tabId: state.tabId, profile, persist: shouldPersist })
 	refreshProxyMeta()
 }
 
@@ -540,7 +573,7 @@ async function pollRouting() {
 
 function handleBackgroundResponse(resp) {
 	if (!resp) return
-	if (resp.proxyGroups && state.proxyGroups.length === 0) {
+	if (resp.proxyGroups && state.proxyGroups.length === 0 && Object.keys(state.proxyProviders).length === 0) {
 		state.proxyGroups = resp.proxyGroups
 		populateProxyOptions()
 	}
@@ -560,7 +593,7 @@ async function refreshProxyData(initial = false) {
 
 		state.proxyMap = proxyMap
 		state.proxyProviders = proxyProviders
-		state.proxyGroups = buildProxyGroups(proxyMap)
+		state.proxyGroups = buildRuleProxyTargets(proxyProviders)
 		populateProxyOptions()
 
 		if (state.currentSelector && document.getElementById('selector-section').style.display !== 'none') {
@@ -575,14 +608,15 @@ async function refreshProxyData(initial = false) {
 	}
 }
 
-function buildProxyGroups(proxyMap) {
-	return Object.values(proxyMap)
-		.filter(proxy => proxy?.name && proxy.type && proxy.type !== 'Direct' && proxy.type !== 'Reject')
-		.map(proxy => ({
-			name: proxy.name,
-			type: proxy.type,
-			now: proxy.now || '',
+function buildRuleProxyTargets(proxyProviders) {
+	return Object.entries(proxyProviders || {})
+		.map(([providerName, provider]) => ({
+			name: String(providerName || '').trim(),
+			type: provider?.type || '',
+			now: '',
+			provider: '',
 		}))
+		.filter(group => !!group.name)
 }
 
 function populateProxyOptions() {
@@ -590,8 +624,7 @@ function populateProxyOptions() {
 	const currentValue = getProxyValue()
 	let options = ''
 	for (const group of state.proxyGroups) {
-		const selected = group.now ? ` (${group.now})` : ''
-		options += `<option value="${escAttr(group.name)}">${escHtml(group.name)}${escHtml(selected)}</option>`
+		options += `<option value="${escAttr(group.name)}">${escHtml(group.name)}</option>`
 	}
 	options += '<option value="DIRECT">DIRECT</option>'
 	options += '<option value="REJECT">REJECT</option>'
@@ -687,7 +720,7 @@ function updateRoutingDisplay(data) {
 	resultEl.innerHTML = html
 
 	resultEl.querySelectorAll('.route-host').forEach(el => {
-		el.addEventListener('click', () => showAddPanel(el.getAttribute('data-host') || ''))
+		el.addEventListener('click', () => { void showAddPanel(el.getAttribute('data-host') || '') })
 	})
 
 	resultEl.querySelectorAll('.route-rule-line').forEach(el => {
@@ -725,7 +758,8 @@ function showRoutingPanel() {
 	state.currentSelector = ''
 }
 
-function showAddPanel(domain) {
+async function showAddPanel(domain) {
+	debugRuleEdit('showAddPanel', { domain, fallbackDomain: state.domain })
 	document.getElementById('routing-section').style.display = 'none'
 	document.getElementById('selector-section').style.display = 'none'
 	document.getElementById('rule-section').style.display = ''
@@ -734,17 +768,20 @@ function showAddPanel(domain) {
 	document.getElementById('btn-group-edit').style.display = 'none'
 	state.ruleMode = 'add'
 	state.editingRule = null
+	clearRuleResult()
 
+	refreshRuleTypeAvailability()
 	document.getElementById('rule-type').value = 'DOMAIN-SUFFIX'
-	document.getElementById('rule-payload').value = domain || state.domain || ''
 	document.getElementById('rule-no-resolve').checked = false
 	setProxyValue('')
+	await refreshRulePriorityOptions()
 
 	onRuleTypeChange()
-	clearRuleResult()
+	setRulePayloadValue(domain || state.domain || '')
 }
 
-function showEditPanel(ruleStr) {
+async function showEditPanel(ruleStr) {
+	debugRuleEdit('showEditPanel:start', { ruleStr })
 	document.getElementById('routing-section').style.display = 'none'
 	document.getElementById('selector-section').style.display = 'none'
 	document.getElementById('rule-section').style.display = ''
@@ -753,15 +790,23 @@ function showEditPanel(ruleStr) {
 	document.getElementById('btn-group-edit').style.display = ''
 	state.ruleMode = 'edit'
 	state.editingRule = ruleStr
+	clearRuleResult()
 
 	const info = parseRuleDisplay(ruleStr)
+	debugRuleEdit('showEditPanel:parsed', { ruleStr, info })
+	refreshRuleTypeAvailability(info.type || 'DOMAIN-SUFFIX')
 	document.getElementById('rule-type').value = info.type || 'DOMAIN-SUFFIX'
-	document.getElementById('rule-payload').value = info.payload || ''
 	document.getElementById('rule-no-resolve').checked = !!info.noResolve
 	setProxyValue(info.target)
+	await refreshRulePriorityOptions(ruleStr)
 
 	onRuleTypeChange()
-	clearRuleResult()
+	setRulePayloadValue(info.payload || '')
+	debugRuleEdit('showEditPanel:applied', {
+		selectedType: document.getElementById('rule-type').value,
+		selectedPayload: getRulePayloadValue(),
+		selectedProxy: getProxyValue(),
+	})
 }
 
 async function openSelectorPanel(proxyName) {
@@ -915,6 +960,213 @@ function clearRuleResult() {
 	resultEl.className = 'result-box'
 }
 
+function debugRuleEdit(stage, payload) {
+	try {
+		console.log('[Sub Magic][Rule Edit]', stage, payload)
+	} catch {}
+}
+
+async function refreshRulePriorityOptions(currentRule = '') {
+	const select = document.getElementById('rule-priority-select')
+	const hint = document.getElementById('rule-priority-hint')
+	const resultEl = document.getElementById('rule-result')
+
+	if (!state.mihomo.url) {
+		state.localRules = []
+		select.innerHTML = '<option value="">最顶部</option>'
+		select.value = ''
+		select.disabled = true
+		hint.textContent = '未配置 Mihomo API，仅可按最顶部处理。'
+		return
+	}
+
+	try {
+		state.localRules = await getLocalRules(state.mihomo.url, state.mihomo.secret)
+		const candidateRules = currentRule ? excludeCurrentRule(state.localRules, currentRule) : state.localRules
+		let options = '<option value="">最顶部</option>'
+		for (let i = 0; i < candidateRules.length; i++) {
+			options += `<option value="${escAttr(candidateRules[i])}">${escHtml(formatPriorityRuleLabel(candidateRules[i], i))}</option>`
+		}
+		select.innerHTML = options
+		select.disabled = false
+		select.value = resolveDefaultPriorityAnchor(state.localRules, currentRule)
+		updateRulePriorityHint()
+	} catch (error) {
+		state.localRules = []
+		select.innerHTML = '<option value="">最顶部</option>'
+		select.value = ''
+		select.disabled = true
+		hint.textContent = `读取本地规则失败: ${error.message}`
+		if (resultEl.className === 'result-box' && !resultEl.textContent) {
+			resultEl.textContent = `读取本地规则失败: ${error.message}`
+			resultEl.className = 'result-box error'
+		}
+	}
+}
+
+function excludeCurrentRule(rules, currentRule) {
+	let removed = false
+	return rules.filter((rule) => {
+		if (!removed && rule === currentRule) {
+			removed = true
+			return false
+		}
+		return true
+	})
+}
+
+function resolveDefaultPriorityAnchor(rules, currentRule = '') {
+	if (currentRule) {
+		const currentIdx = rules.indexOf(currentRule)
+		return currentIdx > 0 ? rules[currentIdx - 1] : ''
+	}
+
+	const matchIdx = rules.findIndex(rule => parseRuleDisplay(rule).type === 'MATCH')
+	const insertIdx = matchIdx === -1 ? rules.length : matchIdx
+	return insertIdx > 0 ? rules[insertIdx - 1] : ''
+}
+
+function formatPriorityRuleLabel(rule, index) {
+	const parsed = parseRuleDisplay(rule)
+	const summary = parsed.type === 'MATCH'
+		? `MATCH → ${parsed.target || '-'}`
+		: `${parsed.type}${parsed.payload ? ` ${parsed.payload}` : ''} → ${parsed.target || '-'}`
+	return `${index + 1}. ${truncateText(summary, 72)}`
+}
+
+function truncateText(value, maxLength) {
+	const text = String(value || '')
+	if (text.length <= maxLength) return text
+	return `${text.slice(0, Math.max(0, maxLength - 3))}...`
+}
+
+function getPriorityAnchorValue() {
+	return document.getElementById('rule-priority-select').value || ''
+}
+
+function updateRulePriorityHint() {
+	const hint = document.getElementById('rule-priority-hint')
+	const select = document.getElementById('rule-priority-select')
+	const text = select.options[select.selectedIndex]?.textContent || '最顶部'
+	hint.textContent = select.value ? `在 ${text} 下方` : '最顶部'
+}
+
+function getRulePayloadValue() {
+	const type = document.getElementById('rule-type').value
+	if (type === 'IN-TYPE') {
+		return Array.from(document.querySelectorAll('input[name="rule-payload-type"]:checked'))
+			.map((input) => input.value)
+			.join('/')
+	}
+	const select = document.getElementById('rule-payload-select')
+	if (select) return select.value.trim()
+	const input = document.getElementById('rule-payload')
+	return input ? input.value.trim() : ''
+}
+
+function setRulePayloadValue(value) {
+	const type = document.getElementById('rule-type').value
+	if (type === 'IN-TYPE') {
+		const selected = new Set(String(value || '').split('/').map((item) => item.trim().toUpperCase()).filter(Boolean))
+		document.querySelectorAll('input[name="rule-payload-type"]').forEach((input) => {
+			input.checked = selected.has(input.value)
+		})
+		return
+	}
+	const select = document.getElementById('rule-payload-select')
+	if (select) {
+		select.value = String(value || '')
+		return
+	}
+	const input = document.getElementById('rule-payload')
+	if (input) {
+		input.value = String(value || '')
+	}
+}
+
+function renderRulePayloadControl(type) {
+	const container = document.getElementById('rule-payload-control')
+	if (!container) return
+
+	if (type === 'IN-PORT') {
+		const listeners = Array.isArray(state.listeners) ? state.listeners : []
+		const options = listeners
+			.map((listener) => String(listener?.port || '').trim())
+			.filter(Boolean)
+		container.innerHTML = `
+			<select id="rule-payload-select">
+				<option value="">请选择端口</option>
+				${[...new Set(options)].map((port) => `<option value="${escAttr(port)}">${escHtml(port)}</option>`).join('')}
+			</select>
+		`
+		return
+	}
+
+	if (type === 'IN-NAME') {
+		const listeners = Array.isArray(state.listeners) ? state.listeners : []
+		container.innerHTML = `
+			<select id="rule-payload-select">
+				<option value="">请选择 Listener</option>
+				${listeners.map((listener) => `<option value="${escAttr(listener.name || '')}">${escHtml(listener.name || '')}</option>`).join('')}
+			</select>
+		`
+		return
+	}
+
+	if (type === 'IN-USER') {
+		const users = Array.isArray(state.proxyAuthUsers) ? state.proxyAuthUsers : []
+		container.innerHTML = `
+			<select id="rule-payload-select">
+				<option value="">请选择代理用户</option>
+				${users.map((user) => `<option value="${escAttr(user.username || '')}">${escHtml(user.username || '')}</option>`).join('')}
+			</select>
+		`
+		return
+	}
+
+	if (type === 'IN-TYPE') {
+		container.innerHTML = `
+			<div class="rule-payload-multiselect">
+				<label><input type="checkbox" name="rule-payload-type" value="HTTP" />HTTP</label>
+				<label><input type="checkbox" name="rule-payload-type" value="HTTPS" />HTTPS</label>
+				<label><input type="checkbox" name="rule-payload-type" value="SOCKS" />SOCKS</label>
+			</div>
+		`
+		return
+	}
+
+	container.innerHTML = '<input type="text" id="rule-payload" placeholder="example.com" />'
+}
+
+function refreshRuleTypeAvailability(preferredType = '') {
+	const typeSelect = document.getElementById('rule-type')
+	if (!typeSelect) return
+
+	const hasListeners = Array.isArray(state.listeners) && state.listeners.length > 0
+	const hasUsers = Array.isArray(state.proxyAuthUsers) && state.proxyAuthUsers.length > 0
+
+	const optionRules = {
+		'IN-PORT': hasListeners,
+		'IN-NAME': hasListeners,
+		'IN-USER': hasUsers,
+	}
+
+	for (const option of typeSelect.options) {
+		if (Object.prototype.hasOwnProperty.call(optionRules, option.value)) {
+			option.disabled = !optionRules[option.value] && option.value !== preferredType
+		}
+	}
+
+	const currentValue = preferredType || typeSelect.value
+	if (optionRules[currentValue] === false) {
+		if (preferredType) {
+			typeSelect.value = preferredType
+		} else {
+			typeSelect.value = 'DOMAIN-SUFFIX'
+		}
+	}
+}
+
 function formatRule(rule, rulePayload) {
 	if (!rule) return ''
 	const index = rule.indexOf(',')
@@ -940,11 +1192,14 @@ function onRuleTypeChange() {
 	const payloadGroup = document.getElementById('payload-group')
 	const noResolveGroup = document.getElementById('no-resolve-group')
 	const noResolveInput = document.getElementById('rule-no-resolve')
+	const previousValue = getRulePayloadValue()
+	renderRulePayloadControl(type)
 	payloadGroup.style.display = type === 'MATCH' ? 'none' : ''
 	noResolveGroup.style.display = supportsNoResolve(type) ? '' : 'none'
 	if (!supportsNoResolve(type)) {
 		noResolveInput.checked = false
 	}
+	setRulePayloadValue(previousValue)
 }
 
 function supportsNoResolve(type) {
@@ -960,20 +1215,36 @@ function buildRuleString(ruleType, rulePayload, ruleProxy) {
 
 async function handleEditRuleClick(ruleType, rulePayload) {
 	const resultEl = document.getElementById('rule-result')
-	const fallbackRule = rulePayload ? `${ruleType},${rulePayload}` : `${ruleType},`
+	const parsedClickedRule = parseRuleDisplay(ruleType || '')
+	const normalizedType = parsedClickedRule.type || ruleType || ''
+	const normalizedPayload = parsedClickedRule.payload || rulePayload || ''
+	const fallbackRule = normalizedPayload ? `${normalizedType},${normalizedPayload}` : `${normalizedType},`
+	debugRuleEdit('handleEditRuleClick:input', {
+		ruleType,
+		rulePayload,
+		parsedClickedRule,
+		normalizedType,
+		normalizedPayload,
+		fallbackRule,
+	})
 
 	try {
-		const fullRule = await findRuleByConnection(state.mihomo.url, state.mihomo.secret, ruleType, rulePayload)
+		const fullRule = await findRuleByConnection(state.mihomo.url, state.mihomo.secret, normalizedType, normalizedPayload)
+		debugRuleEdit('handleEditRuleClick:lookup', {
+			normalizedType,
+			normalizedPayload,
+			fullRule,
+		})
 		if (!fullRule) {
-			showEditPanel(fallbackRule)
+			await showEditPanel(fallbackRule)
 			resultEl.textContent = '未找到原始规则，已按命中信息回填，代理组可能需要手动确认'
 			resultEl.className = 'result-box error'
 			return
 		}
 
-		showEditPanel(fullRule)
+		await showEditPanel(fullRule)
 	} catch (error) {
-		showEditPanel(fallbackRule)
+		await showEditPanel(fallbackRule)
 		resultEl.textContent = `读取原始规则失败: ${error.message}`
 		resultEl.className = 'result-box error'
 	}
@@ -985,8 +1256,9 @@ async function handleAddRule() {
 	resultEl.className = 'result-box'
 
 	const ruleType = document.getElementById('rule-type').value
-	const rulePayload = ruleType === 'MATCH' ? 'MATCH' : document.getElementById('rule-payload').value.trim()
+	const rulePayload = ruleType === 'MATCH' ? 'MATCH' : getRulePayloadValue()
 	const ruleProxy = getProxyValue()
+	const priorityAnchor = getPriorityAnchorValue()
 
 	if (ruleType !== 'MATCH' && !rulePayload) {
 		resultEl.textContent = '请填写匹配值'
@@ -1015,7 +1287,7 @@ async function handleAddRule() {
 	try {
 		if (hasLocal) {
 			try {
-				await addRuleLocal(state.mihomo.url, state.mihomo.secret, ruleStr)
+				await addRuleLocal(state.mihomo.url, state.mihomo.secret, ruleStr, priorityAnchor)
 				messages.push('本地添加成功')
 			} catch (error) {
 				messages.push(`本地添加失败: ${error.message}`)
@@ -1023,10 +1295,10 @@ async function handleAddRule() {
 		}
 
 		try {
-			await addRuleRemote(state.subMagic.url, state.subMagic.accessKey, ruleStr)
+			await addRuleRemote(state.subMagic.url, state.subMagic.accessKey, ruleStr, priorityAnchor)
 			if (hasLocal) {
 				resultEl.innerHTML = '<span class="spinner"></span>远程添加成功，等待本地 Mihomo 生效...'
-				const verifyResult = await waitForRulePresent(state.mihomo.url, state.mihomo.secret, ruleStr)
+				const verifyResult = await waitForRulePresent(state.mihomo.url, state.mihomo.secret, ruleStr, priorityAnchor)
 				if (verifyResult.ok) {
 					messages.push(`远程添加成功，本地 Mihomo 已生效（${verifyResult.attempts}s）`)
 				} else {
@@ -1053,8 +1325,9 @@ async function handleSaveRule() {
 	resultEl.className = 'result-box'
 
 	const ruleType = document.getElementById('rule-type').value
-	const rulePayload = ruleType === 'MATCH' ? 'MATCH' : document.getElementById('rule-payload').value.trim()
+	const rulePayload = ruleType === 'MATCH' ? 'MATCH' : getRulePayloadValue()
 	const ruleProxy = getProxyValue()
+	const priorityAnchor = getPriorityAnchorValue()
 
 	if (ruleType !== 'MATCH' && !rulePayload) {
 		resultEl.textContent = '请填写匹配值'
@@ -1085,10 +1358,10 @@ async function handleSaveRule() {
 	resultEl.innerHTML = '<span class="spinner"></span>保存中...'
 
 	try {
-		await updateRuleRemote(state.subMagic.url, state.subMagic.accessKey, state.editingRule, newRuleStr)
+		await updateRuleRemote(state.subMagic.url, state.subMagic.accessKey, state.editingRule, newRuleStr, priorityAnchor)
 		if (hasLocal) {
 			resultEl.innerHTML = '<span class="spinner"></span>远程修改成功，等待本地 Mihomo 生效...'
-			const verifyResult = await waitForRuleUpdate(state.mihomo.url, state.mihomo.secret, state.editingRule, newRuleStr)
+			const verifyResult = await waitForRuleUpdate(state.mihomo.url, state.mihomo.secret, state.editingRule, newRuleStr, priorityAnchor)
 			state.editingRule = newRuleStr
 			if (verifyResult.ok) {
 				resultEl.textContent = `远程修改成功，本地 Mihomo 已生效（${verifyResult.attempts}s）`

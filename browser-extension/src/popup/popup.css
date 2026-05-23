@@ -178,6 +178,38 @@ body {
 	border-color: var(--primary);
 }
 
+.form-hint {
+	margin-top: 4px;
+	font-size: 11px;
+	line-height: 1.4;
+	color: var(--text-muted);
+}
+
+.rule-payload-multiselect {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 8px;
+}
+
+.rule-payload-multiselect label {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 8px;
+	background: var(--surface-2);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	font-size: 11px;
+	color: var(--text);
+	text-transform: none;
+	letter-spacing: 0;
+	margin-bottom: 0;
+}
+
+.rule-payload-multiselect input {
+	width: auto;
+}
+
 .form-actions {
 	display: flex;
 	gap: 6px;

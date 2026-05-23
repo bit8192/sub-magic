@@ -292,6 +292,24 @@ describe("API endpoints", () => {
     expect(stored?.indexOf("DOMAIN-SUFFIX,example.com,Proxy")).toBeLessThan(stored?.indexOf("MATCH,Proxy") ?? 0)
   })
 
+  it("POST /api/rules/add inserts a rule after the selected previous rule", async () => {
+    const res = await SELF.fetch("http://example.com/api/rules/add", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer sm_api_testkey456",
+      },
+      body: JSON.stringify({
+        rule: "DOMAIN-SUFFIX,example.com,Proxy",
+        insertAfter: "GEOIP,CN,DIRECT",
+      }),
+    })
+    expect(res.status).toBe(200)
+    const stored = await env.SUB_MAGIC.get("config")
+    expect(stored?.indexOf("GEOIP,CN,DIRECT")).toBeLessThan(stored?.indexOf("DOMAIN-SUFFIX,example.com,Proxy") ?? 0)
+    expect(stored?.indexOf("DOMAIN-SUFFIX,example.com,Proxy")).toBeLessThan(stored?.indexOf("MATCH,Proxy") ?? 0)
+  })
+
   it("POST /api/rules/update updates an existing rule", async () => {
     const res = await SELF.fetch("http://example.com/api/rules/update", {
       method: "POST",
@@ -308,6 +326,24 @@ describe("API endpoints", () => {
     const stored = await env.SUB_MAGIC.get("config")
     expect(stored).toContain("GEOIP,CN,Proxy")
     expect(stored).not.toContain("GEOIP,CN,DIRECT")
+  })
+
+  it("POST /api/rules/update can reorder an existing rule to the top", async () => {
+    const res = await SELF.fetch("http://example.com/api/rules/update", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer sm_api_testkey456",
+      },
+      body: JSON.stringify({
+        oldRule: "MATCH,Proxy",
+        newRule: "MATCH,Proxy",
+        insertAfter: "",
+      }),
+    })
+    expect(res.status).toBe(200)
+    const stored = await env.SUB_MAGIC.get("config")
+    expect(stored?.indexOf("MATCH,Proxy")).toBeLessThan(stored?.indexOf("GEOIP,CN,DIRECT") ?? 0)
   })
 
   it("POST /api/rules/add rejects missing API key", async () => {
