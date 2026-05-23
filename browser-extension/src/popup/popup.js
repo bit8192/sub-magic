@@ -16,8 +16,13 @@ import {
 	getProxyProviders,
 	setProxySelector,
 } from '../utils/api.js'
-
-const DEFAULT_PROXY_TYPE = 'http'
+import {
+	DEFAULT_PROXY_TYPE,
+	buildAvailableProxyPortOptions,
+	findProxyPortOption,
+	getPreferredProxyType,
+	isProxyTypeSupportedByPortOption,
+} from '../utils/proxy-options.js'
 
 const state = {
 	domain: '',
@@ -31,6 +36,7 @@ const state = {
 	proxyAuthUsers: [],
 	listeners: [],
 	mihomoConfigs: null,
+	proxyPortOptions: [],
 	proxyValidation: null,
 	proxyGroups: [],
 	proxyMap: {},
@@ -60,9 +66,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 	document.getElementById('btn-apply-proxy').addEventListener('click', handleApplyProxy)
 	document.getElementById('rule-type').addEventListener('change', onRuleTypeChange)
 	document.getElementById('selector-result').addEventListener('click', handleSelectorResultClick)
+	document.getElementById('proxy-port').addEventListener('change', () => refreshProxyForm())
 	document.getElementById('proxy-type').addEventListener('change', () => refreshProxyForm())
 	document.getElementById('proxy-auth-user').addEventListener('change', () => refreshProxyMeta())
-	document.getElementById('proxy-listener').addEventListener('change', () => refreshProxyForm())
 	document.getElementById('rule-priority-select').addEventListener('change', updateRulePriorityHint)
 
 	const proxySelect = document.getElementById('rule-proxy-select')
@@ -177,73 +183,76 @@ function getMihomoHost() {
 	}
 }
 
-function normalizeListenerPort(port) {
-	const value = Number(port)
-	return Number.isFinite(value) ? value : 0
-}
-
-function areConfigInboundPortsDisabled() {
-	const configs = state.mihomoConfigs || {}
-	const ports = ['port', 'socks-port', 'mixed-port']
-	return ports.every((key) => {
-		const value = configs[key]
-		if (value === undefined || value === null || value === '') return true
-		return Number(value) === 0
-	})
-}
-
-function canUseListenersFallback() {
-	return areConfigInboundPortsDisabled() && Array.isArray(state.listeners) && state.listeners.length > 0
-}
-
 function isProxyAuthUserSupported(proxyType) {
 	return !(state.browser.id === 'chrome' && (proxyType === 'socks4' || proxyType === 'socks5'))
 }
 
-function filterListenersByProxyType(proxyType) {
-	const listeners = state.listeners || []
-	if (proxyType === 'http' || proxyType === 'https') {
-		return listeners.filter(listener => listener?.type === 'http' || listener?.type === 'mixed')
-	}
-	if (proxyType === 'socks5') {
-		return listeners.filter(listener => listener?.type === 'socks' || listener?.type === 'mixed')
-	}
-	return listeners.filter(listener => listener?.type === 'socks')
+function getSelectedPortOption() {
+	const selectedId = document.getElementById('proxy-port').value
+	return state.proxyPortOptions.find((option) => option.id === selectedId) || null
 }
 
-function resolvePortForType(proxyType, selectedListenerName = '') {
-	const configs = state.mihomoConfigs || {}
-	const listeners = filterListenersByProxyType(proxyType)
+function renderProxyPortOptions(selectedId = '') {
+	const select = document.getElementById('proxy-port')
+	let options = [...state.proxyPortOptions]
 
-	if (proxyType === 'http' || proxyType === 'https') {
-		const directPort = Number(configs.port || 0)
-		const mixedPort = Number(configs['mixed-port'] || 0)
-		if (directPort > 0) return { port: directPort, source: 'config', listenerName: '' }
-		if (mixedPort > 0) return { port: mixedPort, source: 'config', listenerName: '' }
-	} else if (proxyType === 'socks5') {
-		const directPort = Number(configs['socks-port'] || 0)
-		const mixedPort = Number(configs['mixed-port'] || 0)
-		if (directPort > 0) return { port: directPort, source: 'config', listenerName: '' }
-		if (mixedPort > 0) return { port: mixedPort, source: 'config', listenerName: '' }
-	} else {
-		const directPort = Number(configs['socks-port'] || 0)
-		if (directPort > 0) return { port: directPort, source: 'config', listenerName: '' }
+	if (selectedId && !options.some((option) => option.id === selectedId)) {
+		const fallbackPort = Number(state.proxyProfile?.port || 0)
+		const fallbackLabel = state.proxyProfile?.source === 'listener' && state.proxyProfile?.listenerName
+			? `${state.proxyProfile.listenerName} · ${fallbackPort || '-'} · 已失效`
+			: `${state.proxyProfile?.source === 'config' ? '/configs' : '未知来源'} · ${fallbackPort || '-'} · 已失效`
+		options.unshift({
+			id: selectedId,
+			source: state.proxyProfile?.source || 'config',
+			sourceLabel: state.proxyProfile?.source === 'listener' && state.proxyProfile?.listenerName
+				? `listener / ${state.proxyProfile.listenerName}`
+				: '/configs',
+			listenerName: state.proxyProfile?.listenerName || '',
+			port: fallbackPort,
+			supportedTypes: [state.proxyProfile?.proxyType || DEFAULT_PROXY_TYPE],
+			label: fallbackLabel,
+		})
 	}
 
-	if (!canUseListenersFallback()) {
-		return { port: 0, source: 'config', listenerName: '' }
+	let html = '<option value="">请选择</option>'
+	for (const option of options) {
+		const selected = option.id === selectedId ? ' selected' : ''
+		html += `<option value="${escAttr(option.id)}"${selected}>${escHtml(option.label)}</option>`
+	}
+	select.innerHTML = html
+	select.disabled = options.length === 0
+}
+
+function renderProxyTypeOptions(selectedType = '') {
+	const select = document.getElementById('proxy-type')
+	const option = getSelectedPortOption()
+	const supportedTypes = option?.supportedTypes || []
+	const preferredType = getPreferredProxyType(option, selectedType, DEFAULT_PROXY_TYPE)
+	const labels = {
+		http: 'HTTP',
+		https: 'HTTPS',
+		socks4: 'SOCKS4',
+		socks5: 'SOCKS5',
 	}
 
-	const selected = listeners.find(listener => listener.name === selectedListenerName) || listeners[0] || null
-	return {
-		port: selected ? normalizeListenerPort(selected.port) : 0,
-		source: 'listener',
-		listenerName: selected?.name || '',
+	let html = ''
+	for (const type of supportedTypes) {
+		const selected = type === preferredType ? ' selected' : ''
+		html += `<option value="${type}"${selected}>${labels[type] || type.toUpperCase()}</option>`
 	}
+	select.innerHTML = html
+	select.disabled = supportedTypes.length === 0
+	if (supportedTypes.length === 0) {
+		select.value = ''
+	}
+}
+
+function getSelectedProxyType() {
+	return document.getElementById('proxy-type').value || ''
 }
 
 function getSelectedAuthUser() {
-	const proxyType = document.getElementById('proxy-type').value
+	const proxyType = getSelectedProxyType()
 	if (!isProxyAuthUserSupported(proxyType)) return null
 	const selectedUsername = document.getElementById('proxy-auth-user').value
 	if (!selectedUsername) return null
@@ -275,15 +284,15 @@ function buildProxyValidation(profile) {
 		return { ok: false, reason: '无法从 Mihomo API 地址解析代理 host。' }
 	}
 
-	const resolution = resolvePortForType(profile.proxyType, profile.listenerName)
-	if (resolution.source === 'listener' && !resolution.listenerName) {
-		return { ok: false, reason: '当前代理方式未从 configs 获取到端口，请先选择 listener。' }
+	const portOption = getSelectedPortOption()
+	if (!portOption) {
+		return { ok: false, reason: '当前没有可用代理端口。' }
 	}
-	if (resolution.port <= 0) {
-		if (Array.isArray(state.listeners) && state.listeners.length > 0 && !canUseListenersFallback()) {
-			return { ok: false, reason: '仅当 /configs 中 port、socks-port、mixed-port 全部为 0 或未配置时，才允许改用 listener。' }
-		}
-		return { ok: false, reason: '当前代理方式没有可用端口。' }
+	if (!isProxyTypeSupportedByPortOption(portOption, profile.proxyType)) {
+		return { ok: false, reason: '当前代理端口不支持所选代理方式。' }
+	}
+	if (Number(portOption.port) <= 0) {
+		return { ok: false, reason: '当前代理端口无效。' }
 	}
 
 	if (
@@ -297,21 +306,23 @@ function buildProxyValidation(profile) {
 	return {
 		ok: true,
 		host,
-		port: resolution.port,
-		source: resolution.source,
-		listenerName: resolution.listenerName,
+		port: Number(portOption.port),
+		source: portOption.source,
+		listenerName: portOption.listenerName || '',
+		sourceLabel: portOption.sourceLabel || '',
 	}
 }
 
 function buildProfileFromForm() {
 	const currentProfile = state.proxyProfile || {}
+	const portOption = getSelectedPortOption()
 	const draft = {
 		enabled: true,
-		proxyType: document.getElementById('proxy-type').value,
+		proxyType: getSelectedProxyType(),
 		host: getMihomoHost(),
 		port: 0,
-		listenerName: document.getElementById('proxy-listener').value,
-		source: 'config',
+		listenerName: portOption?.listenerName || '',
+		source: portOption?.source || 'config',
 		authUser: getSelectedAuthUser(),
 	}
 	const validation = buildProxyValidation(draft)
@@ -344,43 +355,17 @@ function renderProxyAuthUsers() {
 	select.innerHTML = html
 }
 
-function renderListenerOptions(proxyType) {
-	const listeners = [...filterListenersByProxyType(proxyType)]
-	const groupEl = document.getElementById('proxy-listener-group')
-	const select = document.getElementById('proxy-listener')
-	const resolution = resolvePortForType(proxyType, state.proxyProfile?.listenerName || '')
-	const listenersAvailable = canUseListenersFallback()
-	const needsListener = listenersAvailable && resolution.source === 'listener'
-
-	if (resolution.listenerName && !listeners.some(listener => listener.name === resolution.listenerName)) {
-		listeners.unshift({ name: resolution.listenerName, type: 'unknown', port: state.proxyProfile?.port || '' })
-	}
-
-	groupEl.style.display = needsListener ? '' : 'none'
-
-	let html = '<option value="">请选择</option>'
-	for (const listener of listeners) {
-		const port = normalizeListenerPort(listener.port)
-		const selected = listener.name === resolution.listenerName ? ' selected' : ''
-		html += `<option value="${escAttr(listener.name)}"${selected}>${escHtml(listener.name)} · ${escHtml(listener.type || '')} · ${port || '-'}</option>`
-	}
-	select.innerHTML = html
-	select.disabled = !listenersAvailable
-}
-
 function applyProxyProfileToForm() {
 	const profile = state.proxyProfile || {
 		proxyType: DEFAULT_PROXY_TYPE,
 		listenerName: '',
 		authUser: null,
 	}
-	document.getElementById('proxy-type').value = profile.proxyType || DEFAULT_PROXY_TYPE
+	const selectedPortOption = findProxyPortOption(state.proxyPortOptions, profile)
+	renderProxyPortOptions(selectedPortOption?.id || '')
+	renderProxyTypeOptions(profile.proxyType || DEFAULT_PROXY_TYPE)
 	renderProxyAuthUsers()
-	refreshProxyAuthUserAvailability(profile.proxyType || DEFAULT_PROXY_TYPE)
-	renderListenerOptions(profile.proxyType || DEFAULT_PROXY_TYPE)
-	if (profile.listenerName) {
-		document.getElementById('proxy-listener').value = profile.listenerName
-	}
+	refreshProxyAuthUserAvailability(getSelectedProxyType())
 	refreshProxyMeta()
 }
 
@@ -404,6 +389,7 @@ async function refreshProxyControls() {
 		state.mihomoConfigs = configs || {}
 		state.proxyAuthUsers = Array.isArray(authUsers) ? authUsers : []
 		state.listeners = Array.isArray(listeners) ? listeners : []
+		state.proxyPortOptions = buildAvailableProxyPortOptions(state.mihomoConfigs, state.listeners)
 		refreshRuleTypeAvailability()
 		if (!state.proxyProfile) {
 			state.proxyProfile = {
@@ -434,9 +420,9 @@ async function refreshProxyControls() {
 }
 
 function refreshProxyForm() {
-	const proxyType = document.getElementById('proxy-type').value
+	renderProxyTypeOptions(getSelectedProxyType() || state.proxyProfile?.proxyType || DEFAULT_PROXY_TYPE)
+	const proxyType = getSelectedProxyType()
 	refreshProxyAuthUserAvailability(proxyType)
-	renderListenerOptions(proxyType)
 	refreshProxyMeta()
 }
 
@@ -483,10 +469,10 @@ function refreshProxyMeta(overrideValidation = null) {
 	const statusEl = document.getElementById('proxy-status')
 	const metaEl = document.getElementById('proxy-meta')
 	const draftProfile = {
-		proxyType: document.getElementById('proxy-type').value,
+		proxyType: getSelectedProxyType(),
 		host: getMihomoHost(),
 		port: 0,
-		listenerName: document.getElementById('proxy-listener').value,
+		listenerName: getSelectedPortOption()?.listenerName || '',
 		authUser: getSelectedAuthUser(),
 	}
 	const validation = overrideValidation || buildProxyValidation(draftProfile)
@@ -505,7 +491,7 @@ function refreshProxyMeta(overrideValidation = null) {
 	draftProfile.source = validation.source
 	statusEl.textContent = isProxyProfileActive(state.proxyProfile) ? '代理中' : '未代理'
 	statusEl.className = 'routing-status connected'
-	metaEl.innerHTML = `隔离模式: <strong>${state.proxyIsolation ? '按标签页' : '全局共享'}</strong><br>地址: <strong>${escHtml(validation.host)}:${validation.port}</strong>`
+	metaEl.innerHTML = `隔离模式: <strong>${state.proxyIsolation ? '按标签页' : '全局共享'}</strong><br>地址: <strong>${escHtml(validation.host)}:${validation.port}</strong><br>来源: <strong>${escHtml(validation.sourceLabel || validation.source || '')}</strong>`
 	updateApplyButton(validation, draftProfile)
 }
 

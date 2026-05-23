@@ -14,6 +14,12 @@
 	<div class="section" id="proxy-section">
 		<div class="section-title">代理控制 <span id="proxy-status" class="routing-status loading">不可用</span></div>
 		<div class="form-group">
+			<label>代理端口</label>
+			<select id="proxy-port">
+				<option value="">请选择</option>
+			</select>
+		</div>
+		<div class="form-group">
 			<label>代理方式</label>
 			<select id="proxy-type">
 				<option value="http">HTTP</option>
@@ -22,18 +28,12 @@
 				<option value="socks5">SOCKS5</option>
 			</select>
 		</div>
-			<div class="form-group">
-				<label>代理授权用户</label>
-				<select id="proxy-auth-user">
-					<option value="">不使用代理用户</option>
-				</select>
-				<div class="form-hint" id="proxy-auth-user-hint"></div>
-			</div>
-		<div class="form-group" id="proxy-listener-group" style="display:none">
-			<label>Listener</label>
-			<select id="proxy-listener">
-				<option value="">请选择</option>
+		<div class="form-group">
+			<label>代理授权用户</label>
+			<select id="proxy-auth-user">
+				<option value="">不使用代理用户</option>
 			</select>
+			<div class="form-hint" id="proxy-auth-user-hint"></div>
 		</div>
 		<div class="proxy-meta" id="proxy-meta"></div>
 		<div class="form-actions">
