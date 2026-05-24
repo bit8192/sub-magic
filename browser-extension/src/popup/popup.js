@@ -23,6 +23,7 @@ import {
 	getPreferredProxyType,
 	isProxyTypeSupportedByPortOption,
 } from '../utils/proxy-options.js'
+import { getGeoRuleSuggestions } from '../utils/geodata.js'
 
 const state = {
 	domain: '',
@@ -44,10 +45,12 @@ const state = {
 	localRules: [],
 	ruleMode: null,
 	editingRule: null,
+	ruleGeoContext: { host: '', destinationIps: [] },
 	currentSelector: '',
 	routingData: null,
 	proxyPanelCollapsed: false,
 	proxyPanelTouched: false,
+	geoSuggestionSeq: 0,
 }
 
 let pollTimer = null
@@ -71,6 +74,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 	document.getElementById('btn-toggle-proxy-panel').addEventListener('click', toggleProxyPanel)
 	document.getElementById('rule-type').addEventListener('change', onRuleTypeChange)
 	document.getElementById('selector-result').addEventListener('click', handleSelectorResultClick)
+	document.getElementById('geo-suggestion-box').addEventListener('click', handleGeoSuggestionClick)
 	document.getElementById('proxy-port').addEventListener('change', () => refreshProxyForm())
 	document.getElementById('proxy-type').addEventListener('change', () => refreshProxyForm())
 	document.getElementById('proxy-auth-user').addEventListener('change', () => refreshProxyMeta())
@@ -810,7 +814,7 @@ function updateRoutingDisplay(data) {
 		html += `<div class="${cardClass}">
 			<div class="route-header">
 				<span class="route-count">${group.count}</span>
-				<span class="route-host" data-host="${escAttr(group.host)}" title="${escAttr(hostTitle)}">${escHtml(group.host)}${issueTag}${sharedTag}${confidenceTag}</span>
+				<span class="route-host" data-host="${escAttr(group.host)}" data-destination-ips="${escAttr((group.destinationIps || []).join(','))}" title="${escAttr(hostTitle)}">${escHtml(group.host)}${issueTag}${sharedTag}${confidenceTag}</span>
 			</div>
 			<div class="route-chain-line${isIssue ? ' issue' : ''}">${chainHtml}</div>`
 
@@ -824,7 +828,13 @@ function updateRoutingDisplay(data) {
 	resultEl.innerHTML = html
 
 	resultEl.querySelectorAll('.route-host').forEach(el => {
-		el.addEventListener('click', () => { void showAddPanel(el.getAttribute('data-host') || '') })
+		el.addEventListener('click', () => {
+			const destinationIps = String(el.getAttribute('data-destination-ips') || '')
+				.split(',')
+				.map(ip => ip.trim())
+				.filter(Boolean)
+			void showAddPanel(el.getAttribute('data-host') || '', destinationIps)
+		})
 	})
 
 	resultEl.querySelectorAll('.route-rule-line').forEach(el => {
@@ -876,8 +886,8 @@ function showRoutingPanel() {
 	state.currentSelector = ''
 }
 
-async function showAddPanel(domain) {
-	debugRuleEdit('showAddPanel', { domain, fallbackDomain: state.domain })
+async function showAddPanel(domain, destinationIps = []) {
+	debugRuleEdit('showAddPanel', { domain, destinationIps, fallbackDomain: state.domain })
 	document.getElementById('routing-section').style.display = 'none'
 	document.getElementById('selector-section').style.display = 'none'
 	document.getElementById('rule-section').style.display = ''
@@ -886,6 +896,10 @@ async function showAddPanel(domain) {
 	document.getElementById('btn-group-edit').style.display = 'none'
 	state.ruleMode = 'add'
 	state.editingRule = null
+	state.ruleGeoContext = {
+		host: normalizeRuleHost(domain || state.domain || ''),
+		destinationIps: normalizeDestinationIps(destinationIps),
+	}
 	clearRuleResult()
 
 	refreshRuleTypeAvailability()
@@ -896,6 +910,7 @@ async function showAddPanel(domain) {
 
 	onRuleTypeChange()
 	setRulePayloadValue(domain || state.domain || '')
+	await refreshGeoSuggestions()
 }
 
 async function showEditPanel(ruleStr) {
@@ -908,9 +923,13 @@ async function showEditPanel(ruleStr) {
 	document.getElementById('btn-group-edit').style.display = ''
 	state.ruleMode = 'edit'
 	state.editingRule = ruleStr
+	const info = parseRuleDisplay(ruleStr)
+	state.ruleGeoContext = {
+		host: normalizeRuleHost(info.payload || ''),
+		destinationIps: [],
+	}
 	clearRuleResult()
 
-	const info = parseRuleDisplay(ruleStr)
 	debugRuleEdit('showEditPanel:parsed', { ruleStr, info })
 	refreshRuleTypeAvailability(info.type || 'DOMAIN-SUFFIX')
 	document.getElementById('rule-type').value = info.type || 'DOMAIN-SUFFIX'
@@ -920,6 +939,7 @@ async function showEditPanel(ruleStr) {
 
 	onRuleTypeChange()
 	setRulePayloadValue(info.payload || '')
+	await refreshGeoSuggestions()
 	debugRuleEdit('showEditPanel:applied', {
 		selectedType: document.getElementById('rule-type').value,
 		selectedPayload: getRulePayloadValue(),
@@ -1202,6 +1222,28 @@ function setRulePayloadValue(value) {
 	}
 }
 
+function attachRulePayloadListeners() {
+	const select = document.getElementById('rule-payload-select')
+	if (select) {
+		select.addEventListener('change', () => {
+			void refreshGeoSuggestions()
+		})
+	}
+
+	const input = document.getElementById('rule-payload')
+	if (input) {
+		input.addEventListener('input', () => {
+			void refreshGeoSuggestions()
+		})
+	}
+
+	document.querySelectorAll('input[name="rule-payload-type"]').forEach((checkbox) => {
+		checkbox.addEventListener('change', () => {
+			void refreshGeoSuggestions()
+		})
+	})
+}
+
 function renderRulePayloadControl(type) {
 	const container = document.getElementById('rule-payload-control')
 	if (!container) return
@@ -1318,6 +1360,102 @@ function onRuleTypeChange() {
 		noResolveInput.checked = false
 	}
 	setRulePayloadValue(previousValue)
+	attachRulePayloadListeners()
+	void refreshGeoSuggestions()
+}
+
+async function refreshGeoSuggestions() {
+	const suggestionBox = document.getElementById('geo-suggestion-box')
+	if (!suggestionBox) return
+
+	const payload = getRulePayloadValue()
+	const type = document.getElementById('rule-type').value
+	const host = normalizeRuleHost(payload || state.ruleGeoContext.host)
+	const destinationIps = normalizeDestinationIps(state.ruleGeoContext.destinationIps)
+	const shouldLookupHost = shouldLookupGeosite(type, payload)
+	const shouldLookupGeoip = destinationIps.length > 0
+
+	if (!state.mihomoConfigs || (!shouldLookupHost && !shouldLookupGeoip)) {
+		renderGeoSuggestions([])
+		return
+	}
+
+	const seq = ++state.geoSuggestionSeq
+	suggestionBox.hidden = false
+	suggestionBox.innerHTML = '<div class="geo-suggestion-meta"><span class="spinner"></span>检查 GeoSite / GeoIP...</div>'
+
+	const lookupHost = shouldLookupHost ? host : ''
+	try {
+		const suggestions = await getGeoRuleSuggestions(state.mihomoConfigs, lookupHost, shouldLookupGeoip ? destinationIps : [])
+		if (seq !== state.geoSuggestionSeq) return
+		renderGeoSuggestions(suggestions)
+	} catch {
+		if (seq !== state.geoSuggestionSeq) return
+		renderGeoSuggestions([])
+	}
+}
+
+function renderGeoSuggestions(suggestions) {
+	const suggestionBox = document.getElementById('geo-suggestion-box')
+	if (!suggestionBox) return
+	if (!Array.isArray(suggestions) || suggestions.length === 0) {
+		suggestionBox.hidden = true
+		suggestionBox.innerHTML = ''
+		return
+	}
+
+	suggestionBox.hidden = false
+	suggestionBox.innerHTML = `
+		<div class="geo-suggestion-meta">匹配到可复用的 Geo 规则，点击可直接回填规则类型和匹配值。</div>
+		<div class="geo-suggestion-list">
+			${suggestions.map((suggestion) => `
+				<button
+					type="button"
+					class="geo-suggestion-item"
+					data-geo-type="${escAttr(suggestion.type)}"
+					data-geo-value="${escAttr(suggestion.value)}"
+				>
+					<div class="geo-suggestion-main">
+						<div class="geo-suggestion-title">${escHtml(suggestion.label)}</div>
+						<div class="geo-suggestion-detail">${escHtml(suggestion.detail || '')}</div>
+					</div>
+					<span class="geo-suggestion-type ${suggestion.type === 'GEOIP' ? 'geoip' : 'geosite'}">${escHtml(suggestion.type)}</span>
+				</button>
+			`).join('')}
+		</div>
+	`
+}
+
+function handleGeoSuggestionClick(event) {
+	const button = event.target.closest('.geo-suggestion-item')
+	if (!button) return
+	const nextType = button.getAttribute('data-geo-type') || ''
+	const nextValue = button.getAttribute('data-geo-value') || ''
+	if (!nextType || !nextValue) return
+
+	document.getElementById('rule-type').value = nextType
+	onRuleTypeChange()
+	setRulePayloadValue(nextValue)
+	if (nextType === 'GEOIP') {
+		document.getElementById('rule-no-resolve').checked = false
+	}
+	void refreshGeoSuggestions()
+}
+
+function shouldLookupGeosite(type, payload) {
+	if (type === 'MATCH') return false
+	const host = normalizeRuleHost(payload || state.ruleGeoContext.host)
+	return !!host && host.includes('.')
+}
+
+function normalizeRuleHost(value) {
+	return String(value || '').trim().toLowerCase().replace(/\.+$/, '')
+}
+
+function normalizeDestinationIps(values) {
+	return [...new Set((Array.isArray(values) ? values : [])
+		.map(value => String(value || '').trim())
+		.filter(Boolean))]
 }
 
 function supportsNoResolve(type) {

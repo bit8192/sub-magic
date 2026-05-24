@@ -602,6 +602,7 @@ function logMergedGroups(tabId, groups, totalConnections, issueTotal) {
 		kind: group.kind || 'matched',
 		host: group.host || '',
 		port: group.destinationPort || '',
+		destinationIps: Array.isArray(group.destinationIps) ? group.destinationIps : [],
 		count: group.count || 0,
 		rule: group.rule || '',
 		error: group.error || '',
@@ -664,12 +665,14 @@ function getMergedGroups(tabId) {
 
 			const rule = c.rule || ''
 			const destinationPort = String(c.metadata?.destinationPort || '')
+			const destinationIp = String(c.metadata?.destinationIP || '').trim()
 			const key = `${host}\0${destinationPort}\0${rule}`
 			if (!allConns.has(key)) {
 				const chain = c.chains || c.chain || []
 				allConns.set(key, {
 					host,
 					destinationPort,
+					destinationIps: destinationIp ? [destinationIp] : [],
 					rule,
 					count: 0,
 					chain: Array.isArray(chain) ? chain : [],
@@ -684,6 +687,12 @@ function getMergedGroups(tabId) {
 			}
 			const group = allConns.get(key)
 			group.count++
+			if (destinationIp && !group.destinationIps.includes(destinationIp)) {
+				group.destinationIps.push(destinationIp)
+				if (group.destinationIps.length > 6) {
+					group.destinationIps = group.destinationIps.slice(0, 6)
+				}
+			}
 			group.owned = group.owned || owned
 			group.shared = group.shared || shared
 			group.otherTabId = group.otherTabId || bestOtherTabId
@@ -723,6 +732,7 @@ function getMergedGroups(tabId) {
 				kind,
 				host: request.host,
 				destinationPort: request.port || '',
+				destinationIps: [],
 				rule: '',
 				count: 0,
 				chain: [],
