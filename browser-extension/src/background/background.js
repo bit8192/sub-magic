@@ -19,6 +19,7 @@ const SNAPSHOT_TTL = 30000
 let proxyGroups = []
 
 const tabRequests = new Map()
+const routingPanelCache = new Map()
 const REQUEST_TTL = 30000
 const CORRELATION_WINDOW = 2000
 const MAX_REQUESTS_PER_TAB = 200
@@ -349,7 +350,11 @@ function httpToWs(url) {
 	return `ws://${base}`
 }
 
-function recordRequest(tabId, url) {
+function getRequestKey(request) {
+	return `${request.requestId || ''}\0${request.ts}\0${request.url || ''}`
+}
+
+function recordRequest(tabId, url, requestId = '') {
 	if (!tabId || tabId < 0) return
 	const info = extractRequestInfo(url)
 	if (!info) return
@@ -360,11 +365,44 @@ function recordRequest(tabId, url) {
 		port: info.port,
 		ts: now,
 		url: info.url,
+		requestId: String(requestId || ''),
+		status: 'pending',
+		error: '',
+		fromCache: false,
 	})
 	const recentRequests = requests
 		.filter(entry => now - entry.ts < REQUEST_TTL)
 		.slice(-MAX_REQUESTS_PER_TAB)
 	tabRequests.set(tabId, recentRequests)
+}
+
+function updateRequest(tabId, requestId, patch) {
+	if (!tabId || tabId < 0 || !requestId) return
+	const requests = tabRequests.get(tabId) || []
+	if (requests.length === 0) return
+	for (let i = requests.length - 1; i >= 0; i--) {
+		if (requests[i].requestId !== requestId) continue
+		requests[i] = {
+			...requests[i],
+			...patch,
+		}
+		tabRequests.set(tabId, requests)
+		return
+	}
+}
+
+function markRequestFailed(tabId, requestId, error) {
+	updateRequest(tabId, requestId, {
+		status: 'failed',
+		error: String(error || '').trim(),
+	})
+}
+
+function markRequestCompleted(tabId, requestId, fromCache) {
+	updateRequest(tabId, requestId, {
+		status: 'completed',
+		fromCache: !!fromCache,
+	})
 }
 
 function cleanupRequests(now) {
@@ -435,13 +473,14 @@ function scoreConnectionAgainstRequests(connection, requests, now) {
 			best = {
 				score,
 				requestTs: request.ts,
+				requestKey: getRequestKey(request),
 				hostScore,
 				portMatched: !!(request.port && connectionPort && request.port === connectionPort),
 			}
 		}
 	}
 
-	return best || { score: 0, requestTs: 0, hostScore: 0, portMatched: false }
+	return best || { score: 0, requestTs: 0, requestKey: '', hostScore: 0, portMatched: false }
 }
 
 function getConfidenceLabel(score) {
@@ -453,13 +492,30 @@ function getConfidenceLabel(score) {
 chrome.webRequest.onBeforeRequest.addListener(
 	(details) => {
 		if (details.tabId < 0) return
-		recordRequest(details.tabId, details.url)
+		recordRequest(details.tabId, details.url, details.requestId)
+	},
+	{ urls: ['<all_urls>'] }
+)
+
+chrome.webRequest.onErrorOccurred.addListener(
+	(details) => {
+		if (details.tabId < 0) return
+		markRequestFailed(details.tabId, details.requestId, details.error)
+	},
+	{ urls: ['<all_urls>'] }
+)
+
+chrome.webRequest.onCompleted.addListener(
+	(details) => {
+		if (details.tabId < 0) return
+		markRequestCompleted(details.tabId, details.requestId, details.fromCache)
 	},
 	{ urls: ['<all_urls>'] }
 )
 
 chrome.tabs.onRemoved.addListener((tabId) => {
 	tabRequests.delete(tabId)
+	clearRoutingPanelCache(tabId)
 	if (proxyState.tabProfiles[String(tabId)]) {
 		delete proxyState.tabProfiles[String(tabId)]
 		persistProxyState().catch(() => {})
@@ -469,6 +525,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 	if (changeInfo.url) {
 		tabRequests.delete(tabId)
+		clearRoutingPanelCache(tabId)
 	}
 })
 
@@ -492,6 +549,76 @@ function addSnapshot(data) {
 	cachedSnapshots = cachedSnapshots.filter(s => now - s.ts < SNAPSHOT_TTL)
 }
 
+function buildRoutingGroupKey(group) {
+	return [
+		group.kind || 'matched',
+		group.host || '',
+		group.destinationPort || '',
+		group.rule || '',
+		group.rulePayload || '',
+		group.error || '',
+	].join('\0')
+}
+
+function mergeRoutingPanelData(tabId, data) {
+	if (!tabId || !data || typeof data !== 'object') return data
+	const nextGroups = Array.isArray(data.groups) ? data.groups : []
+	const cached = routingPanelCache.get(tabId)
+
+	if (!cached) {
+		const initial = {
+			...data,
+			groups: nextGroups.map(group => ({ ...group })),
+		}
+		routingPanelCache.set(tabId, initial)
+		return initial
+	}
+
+	const groupMap = new Map(
+		(cached.groups || []).map(group => [buildRoutingGroupKey(group), { ...group }])
+	)
+	for (const group of nextGroups) {
+		groupMap.set(buildRoutingGroupKey(group), { ...group })
+	}
+
+	const merged = {
+		...cached,
+		...data,
+		total: Math.max(Number(cached.total || 0), Number(data.total || 0)),
+		issueTotal: Math.max(Number(cached.issueTotal || 0), Number(data.issueTotal || 0)),
+		groups: Array.from(groupMap.values()),
+	}
+	routingPanelCache.set(tabId, merged)
+	return merged
+}
+
+function clearRoutingPanelCache(tabId) {
+	if (!tabId || tabId < 0) return
+	routingPanelCache.delete(tabId)
+}
+
+function logMergedGroups(tabId, groups, totalConnections, issueTotal) {
+	const payload = groups.map((group) => ({
+		kind: group.kind || 'matched',
+		host: group.host || '',
+		port: group.destinationPort || '',
+		count: group.count || 0,
+		rule: group.rule || '',
+		error: group.error || '',
+		confidence: group.confidence || '',
+		shared: !!group.shared,
+		chain: Array.isArray(group.chain) ? group.chain : [],
+		latestUrl: group.latestUrl || '',
+	}))
+	console.debug('[sub-magic] routing groups', {
+		tabId,
+		totalConnections,
+		issueTotal,
+		groupCount: groups.length,
+		groups: payload,
+	})
+}
+
 function getMergedGroups(tabId) {
 	const now = Date.now()
 	cleanupRequests(now)
@@ -501,6 +628,7 @@ function getMergedGroups(tabId) {
 	if (cachedSnapshots.length === 0) return { total: 0, groups: [], status: 'fetching' }
 
 	const allConns = new Map()
+	const matchedRequestKeys = new Set()
 
 	for (const snap of cachedSnapshots) {
 		const conns = snap.data.connections || []
@@ -509,6 +637,7 @@ function getMergedGroups(tabId) {
 			if (!host) continue
 			const selfMatch = scoreConnectionAgainstRequests(c, currentTabRequests, now)
 			if (selfMatch.score <= 0) continue
+			if (selfMatch.requestKey) matchedRequestKeys.add(selfMatch.requestKey)
 
 			let bestOtherScore = 0
 			let bestOtherTime = 0
@@ -566,13 +695,66 @@ function getMergedGroups(tabId) {
 		}
 	}
 
-	const groups = Array.from(allConns.values()).sort((a, b) => {
+	const matchedGroups = Array.from(allConns.values()).sort((a, b) => {
 		if (b.score !== a.score) return b.score - a.score
 		return b.count - a.count
 	})
+	const matchedGroupByHostPort = new Map(
+		matchedGroups.map(group => [`${group.host}\0${group.destinationPort || ''}`, group])
+	)
+
+	const issueGroupsMap = new Map()
+	for (const request of currentTabRequests) {
+		const requestKey = getRequestKey(request)
+		if (matchedRequestKeys.has(requestKey)) continue
+		if (request.fromCache) continue
+		const kind = request.status === 'failed' ? 'failed' : 'unmatched'
+		const hostPortKey = `${request.host}\0${request.port || ''}`
+		if (kind === 'unmatched' && matchedGroupByHostPort.has(hostPortKey)) {
+			const matchedGroup = matchedGroupByHostPort.get(hostPortKey)
+			matchedGroup.mergedUnmatchedCount = (matchedGroup.mergedUnmatchedCount || 0) + 1
+			matchedGroup.latestUrl = request.url || matchedGroup.latestUrl || ''
+			matchedGroup.latestTs = Math.max(Number(matchedGroup.latestTs || 0), Number(request.ts || 0))
+			continue
+		}
+		const groupKey = `${kind}\0${request.host}\0${request.port}\0${request.error || ''}`
+		if (!issueGroupsMap.has(groupKey)) {
+			issueGroupsMap.set(groupKey, {
+				kind,
+				host: request.host,
+				destinationPort: request.port || '',
+				rule: '',
+				count: 0,
+				chain: [],
+				rulePayload: '',
+				error: request.error || '',
+				latestUrl: request.url || '',
+				latestTs: request.ts,
+			})
+		}
+		const group = issueGroupsMap.get(groupKey)
+		group.count++
+		if (request.ts >= group.latestTs) {
+			group.latestTs = request.ts
+			group.latestUrl = request.url || group.latestUrl
+			if (request.error) group.error = request.error
+		}
+	}
+
+	const issueGroups = Array.from(issueGroupsMap.values()).sort((a, b) => {
+		if (a.kind !== b.kind) return a.kind === 'failed' ? -1 : 1
+		if (b.latestTs !== a.latestTs) return b.latestTs - a.latestTs
+		return b.count - a.count
+	})
+
+	const groups = [...matchedGroups, ...issueGroups]
+	const totalConnections = matchedGroups.reduce((sum, group) => sum + group.count, 0)
+	const issueTotal = issueGroups.reduce((sum, group) => sum + group.count, 0)
+	logMergedGroups(tabId, groups, totalConnections, issueTotal)
 
 	return {
-		total: groups.reduce((sum, group) => sum + group.count, 0),
+		total: totalConnections,
+		issueTotal,
 		groups,
 		status: 'connected',
 	}
@@ -751,7 +933,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 				} catch {}
 			}
 
-			const data = getMergedGroups(tabId)
+			const data = mergeRoutingPanelData(tabId, getMergedGroups(tabId))
 			await ensureProxyGroups()
 			sendResponse({ data, proxyGroups })
 		})()

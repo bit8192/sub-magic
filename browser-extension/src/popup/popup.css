@@ -247,6 +247,47 @@ body {
 .routing-status.connected { color: var(--success); }
 .routing-status.error { color: var(--danger); }
 
+.section.is-collapsed #proxy-panel-body {
+	display: none;
+}
+
+.section.is-collapsed .section-title {
+	margin-bottom: 0;
+}
+
+.section-toggle {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	width: calc(100% + 8px);
+	margin: -4px;
+	padding: 4px;
+	background: none;
+	border: none;
+	color: inherit;
+	font: inherit;
+	cursor: pointer;
+	text-align: left;
+}
+
+.section-toggle-meta {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.section-toggle-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 18px;
+	height: 18px;
+	font-size: 12px;
+	line-height: 1;
+	transition: transform var(--transition);
+}
+
 .proxy-meta {
 	margin-top: 8px;
 	padding: 10px;
@@ -259,6 +300,10 @@ body {
 
 .proxy-meta strong {
 	color: var(--text);
+}
+
+.section.is-collapsed .section-toggle-icon {
+	transform: rotate(-90deg);
 }
 
 .routing-result {
@@ -287,6 +332,8 @@ body {
 	transition: border-color var(--transition);
 }
 .route-card:last-child { margin-bottom: 0; }
+.route-card.issue.failed { border-left-color: var(--danger); }
+.route-card.issue.unmatched { border-left-color: var(--warning); }
 
 .route-header {
 	display: flex;
@@ -331,6 +378,8 @@ body {
 	word-break: break-all;
 	line-height: 1.6;
 }
+.route-chain-line.issue { color: var(--warning); }
+.route-card.issue.failed .route-chain-line.issue { color: var(--danger); }
 
 .route-chain-token {
 	display: inline;
@@ -362,6 +411,28 @@ body {
 	cursor: pointer;
 }
 .route-rule-line:hover { color: var(--warning); }
+
+.route-issue-tag {
+	display: inline-flex;
+	align-items: center;
+	margin-left: 6px;
+	padding: 0 5px;
+	border-radius: 999px;
+	font-size: 10px;
+	font-weight: 600;
+	line-height: 16px;
+	vertical-align: middle;
+}
+
+.route-issue-tag.failed {
+	background: rgba(255, 107, 107, 0.16);
+	color: var(--danger);
+}
+
+.route-issue-tag.unmatched {
+	background: rgba(255, 184, 77, 0.16);
+	color: var(--warning);
+}
 
 .selector-meta {
 	margin-bottom: 10px;
@@ -476,7 +547,18 @@ body {
 	display: flex;
 	justify-content: space-between;
 	align-items: center;
+	gap: 10px;
 	margin-top: 8px;
+}
+
+.footer-actions {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+
+.footer-link {
+	flex-shrink: 0;
 }
 
 .spinner {

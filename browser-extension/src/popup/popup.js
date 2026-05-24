@@ -45,10 +45,14 @@ const state = {
 	ruleMode: null,
 	editingRule: null,
 	currentSelector: '',
+	routingData: null,
+	proxyPanelCollapsed: false,
+	proxyPanelTouched: false,
 }
 
 let pollTimer = null
 let proxyRefreshTimer = null
+let observedTabUpdateHandler = null
 
 document.addEventListener('DOMContentLoaded', async () => {
 	await initCurrentTab()
@@ -64,6 +68,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 	document.getElementById('btn-settings').addEventListener('click', () => chrome.runtime.openOptionsPage())
 	document.getElementById('btn-control-panel').addEventListener('click', openControlPanel)
 	document.getElementById('btn-apply-proxy').addEventListener('click', handleApplyProxy)
+	document.getElementById('btn-toggle-proxy-panel').addEventListener('click', toggleProxyPanel)
 	document.getElementById('rule-type').addEventListener('change', onRuleTypeChange)
 	document.getElementById('selector-result').addEventListener('click', handleSelectorResultClick)
 	document.getElementById('proxy-port').addEventListener('change', () => refreshProxyForm())
@@ -94,6 +99,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 	window.addEventListener('pagehide', () => {
 		if (pollTimer) clearInterval(pollTimer)
 		if (proxyRefreshTimer) clearInterval(proxyRefreshTimer)
+		if (observedTabUpdateHandler && chrome.tabs?.onUpdated) {
+			chrome.tabs.onUpdated.removeListener(observedTabUpdateHandler)
+			observedTabUpdateHandler = null
+		}
 		if (state.tabId > 0) {
 			chrome.runtime.sendMessage({ type: 'POLL_STOP', tabId: state.tabId }).catch(() => {})
 		}
@@ -104,6 +113,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 			chrome.runtime.sendMessage({ type: 'POLL_STOP', tabId: state.tabId }).catch(() => {})
 		}
 	})
+
+	startTabReloadObserver()
 })
 
 async function loadSettings() {
@@ -393,6 +404,7 @@ async function refreshProxyControls() {
 		refreshRuleTypeAvailability()
 		if (!state.proxyProfile) {
 			state.proxyProfile = {
+				enabled: true,
 				proxyType: DEFAULT_PROXY_TYPE,
 				host: '',
 				port: 0,
@@ -402,15 +414,19 @@ async function refreshProxyControls() {
 			}
 		}
 		applyProxyProfileToForm()
-		const nextProfile = buildProfileFromForm()
+		const nextProfile = {
+			...buildProfileFromForm(),
+			enabled: state.proxyProfile?.enabled !== false,
+		}
 		const needsBootstrap =
+			(state.proxyProfile.enabled !== false) !== (nextProfile.enabled !== false) ||
 			state.proxyProfile.proxyType !== nextProfile.proxyType ||
 			state.proxyProfile.host !== nextProfile.host ||
 			state.proxyProfile.port !== nextProfile.port ||
 			state.proxyProfile.listenerName !== nextProfile.listenerName ||
 			(state.proxyProfile.authUser?.username || '') !== (nextProfile.authUser?.username || '')
 		state.proxyProfile = nextProfile
-		if (needsBootstrap) {
+		if (needsBootstrap && nextProfile.enabled !== false) {
 			await chrome.runtime.sendMessage({ type: 'PROXY_SET_STATE', tabId: state.tabId, profile: nextProfile })
 		}
 		refreshProxyMeta()
@@ -434,11 +450,12 @@ function getProfileSignature(profile) {
 		listenerName: profile?.listenerName || '',
 		authUser: profile?.authUser?.username || '',
 		source: profile?.source || '',
+		enabled: profile?.enabled !== false,
 	})
 }
 
 function isProxyProfileActive(profile) {
-	return !!(profile && profile.host && Number(profile.port) > 0)
+	return !!(profile && profile.host && Number(profile.port) > 0 && profile.enabled !== false)
 }
 
 function updateApplyButton(validation, draftProfile) {
@@ -465,6 +482,26 @@ function updateApplyButton(validation, draftProfile) {
 	button.textContent = currentActive ? '应用代理' : '启用代理'
 }
 
+function setProxyPanelCollapsed(collapsed) {
+	state.proxyPanelCollapsed = !!collapsed
+	const sectionEl = document.getElementById('proxy-section')
+	const buttonEl = document.getElementById('btn-toggle-proxy-panel')
+	if (!sectionEl || !buttonEl) return
+	sectionEl.classList.toggle('is-collapsed', state.proxyPanelCollapsed)
+	buttonEl.setAttribute('aria-expanded', state.proxyPanelCollapsed ? 'false' : 'true')
+	buttonEl.title = state.proxyPanelCollapsed ? '展开代理控制' : '收起代理控制'
+}
+
+function syncProxyPanelCollapsed() {
+	if (state.proxyPanelTouched) return
+	setProxyPanelCollapsed(isProxyProfileActive(state.proxyProfile))
+}
+
+function toggleProxyPanel() {
+	state.proxyPanelTouched = true
+	setProxyPanelCollapsed(!state.proxyPanelCollapsed)
+}
+
 function refreshProxyMeta(overrideValidation = null) {
 	const statusEl = document.getElementById('proxy-status')
 	const metaEl = document.getElementById('proxy-meta')
@@ -482,6 +519,7 @@ function refreshProxyMeta(overrideValidation = null) {
 		statusEl.className = 'routing-status error'
 		metaEl.innerHTML = `隔离模式: <strong>${state.proxyIsolation ? '按标签页' : '全局共享'}</strong><br>${escHtml(validation.reason)}`
 		updateApplyButton(validation, draftProfile)
+		syncProxyPanelCollapsed()
 		return
 	}
 
@@ -491,8 +529,9 @@ function refreshProxyMeta(overrideValidation = null) {
 	draftProfile.source = validation.source
 	statusEl.textContent = isProxyProfileActive(state.proxyProfile) ? '代理中' : '未代理'
 	statusEl.className = 'routing-status connected'
-	metaEl.innerHTML = `隔离模式: <strong>${state.proxyIsolation ? '按标签页' : '全局共享'}</strong><br>地址: <strong>${escHtml(validation.host)}:${validation.port}</strong><br>来源: <strong>${escHtml(validation.sourceLabel || validation.source || '')}</strong>`
+	metaEl.innerHTML = `隔离模式: <strong>${state.proxyIsolation ? '按标签页' : '全局共享'}</strong><br>地址: <strong>${escHtml(validation.host)}:${validation.port}</strong>`
 	updateApplyButton(validation, draftProfile)
+	syncProxyPanelCollapsed()
 }
 
 async function handleApplyProxy() {
@@ -564,8 +603,73 @@ function handleBackgroundResponse(resp) {
 		populateProxyOptions()
 	}
 	if (resp.data) {
-		updateRoutingDisplay(resp.data)
+		updateRoutingDisplay(mergeRoutingData(resp.data))
 	}
+}
+
+function buildRoutingGroupKey(group) {
+	return [
+		group.kind || 'matched',
+		group.host || '',
+		group.destinationPort || '',
+		group.rule || '',
+		group.rulePayload || '',
+		group.error || '',
+	].join('\0')
+}
+
+function mergeRoutingData(data) {
+	if (!data || typeof data !== 'object') return state.routingData
+	const nextGroups = Array.isArray(data.groups) ? data.groups : []
+
+	if (!state.routingData) {
+		state.routingData = {
+			...data,
+			groups: nextGroups.map(group => ({ ...group })),
+		}
+		return state.routingData
+	}
+
+	const groupMap = new Map(
+		(state.routingData.groups || []).map(group => [buildRoutingGroupKey(group), { ...group }])
+	)
+	for (const group of nextGroups) {
+		groupMap.set(buildRoutingGroupKey(group), { ...group })
+	}
+
+	state.routingData = {
+		...state.routingData,
+		...data,
+		total: Math.max(Number(state.routingData.total || 0), Number(data.total || 0)),
+		issueTotal: Math.max(Number(state.routingData.issueTotal || 0), Number(data.issueTotal || 0)),
+		groups: Array.from(groupMap.values()),
+	}
+	return state.routingData
+}
+
+function clearRoutingData() {
+	state.routingData = null
+}
+
+function resetRoutingDisplay() {
+	clearRoutingData()
+	const resultEl = document.getElementById('routing-result')
+	const statusEl = document.getElementById('routing-status')
+	if (!resultEl || !statusEl) return
+	statusEl.textContent = '获取中...'
+	statusEl.className = 'routing-status loading'
+	resultEl.innerHTML = '<div class="routing-empty">页面已重载，等待新流量...</div>'
+}
+
+function startTabReloadObserver() {
+	if (observedTabUpdateHandler || !chrome.tabs?.onUpdated || state.tabId <= 0) return
+	observedTabUpdateHandler = (tabId, changeInfo) => {
+		if (tabId !== state.tabId) return
+		if (changeInfo.status === 'loading') {
+			resetRoutingDisplay()
+		}
+	}
+	chrome.tabs.onUpdated.addListener(observedTabUpdateHandler)
 }
 
 async function refreshProxyData(initial = false) {
@@ -649,11 +753,14 @@ function setProxyValue(value) {
 function updateRoutingDisplay(data) {
 	const resultEl = document.getElementById('routing-result')
 	const statusEl = document.getElementById('routing-status')
+	const groups = Array.isArray(data.groups) ? data.groups : []
+	const matchedGroups = groups.filter(group => !group.kind || group.kind === 'matched')
+	const failedGroups = groups.filter(group => group.kind === 'failed')
+	const unmatchedGroups = groups.filter(group => group.kind === 'unmatched')
 
 	if (data.status === 'disconnected') {
 		statusEl.textContent = '已断开，重连中...'
 		statusEl.className = 'routing-status error'
-		resultEl.innerHTML = ''
 		return
 	}
 
@@ -666,37 +773,48 @@ function updateRoutingDisplay(data) {
 	if (data.status === 'no_domain') {
 		statusEl.textContent = '无法获取当前域名'
 		statusEl.className = 'routing-status error'
-		resultEl.innerHTML = ''
 		return
 	}
 
-	if (!data.groups || data.groups.length === 0) {
-		statusEl.textContent = `监控中 · 命中 ${data.total} 连接`
+	if (groups.length === 0) {
+		statusEl.textContent = `监控中 · 命中 ${data.total || 0} 连接`
 		statusEl.className = 'routing-status connected'
-		resultEl.innerHTML = '<div class="routing-empty">当前域名暂无命中链路</div>'
+		if (!resultEl.innerHTML) {
+			resultEl.innerHTML = '<div class="routing-empty">当前域名暂无链路或异常请求</div>'
+		}
 		return
 	}
 
-	const sharedCount = data.groups.filter(g => g.shared).length
-	statusEl.textContent = `监控中 · 命中 ${data.total} 连接 · ${data.groups.length} 组${sharedCount > 0 ? ` (${sharedCount} 可能共享)` : ''}`
+	const sharedCount = matchedGroups.filter(group => group.shared).length
+	statusEl.textContent = `${failedGroups.length}异常/${unmatchedGroups.length}未命中/${sharedCount}共享/${Number(data.total || 0)}命中/${groups.length}组`
 	statusEl.className = 'routing-status connected'
 
 	let html = ''
-	for (const group of data.groups) {
+	for (const group of groups) {
+		const isIssue = group.kind === 'failed' || group.kind === 'unmatched'
 		const ruleStr = group.rule ? formatRule(group.rule, group.rulePayload) : ''
-		const chainHtml = renderChain(group.chain)
+		const chainHtml = isIssue ? renderIssueLine(group) : renderChain(group.chain)
 		const sharedTag = group.shared ? '<span class="route-shared-tag" title="此连接可能与其他Tab共享">共享</span>' : ''
 		const confidenceLabel = group.confidence === 'high' ? '高' : group.confidence === 'medium' ? '中' : '低'
-		const confidenceTag = `<span class="route-confidence-tag ${group.confidence}" title="匹配置信度：${confidenceLabel}${group.portMatched ? '，端口一致' : ''}">${confidenceLabel}</span>`
+		const confidenceTag = !isIssue
+			? `<span class="route-confidence-tag ${group.confidence}" title="匹配置信度：${confidenceLabel}${group.portMatched ? '，端口一致' : ''}">${confidenceLabel}</span>`
+			: ''
+		const issueTag = group.kind === 'failed'
+			? '<span class="route-issue-tag failed" title="浏览器请求已失败">失败</span>'
+			: group.kind === 'unmatched'
+				? '<span class="route-issue-tag unmatched" title="最近请求未匹配到活动链路">未匹配</span>'
+				: ''
+		const hostTitle = group.latestUrl || group.host
+		const cardClass = isIssue ? `route-card issue ${group.kind}` : 'route-card'
 
-		html += `<div class="route-card">
+		html += `<div class="${cardClass}">
 			<div class="route-header">
 				<span class="route-count">${group.count}</span>
-				<span class="route-host" data-host="${escAttr(group.host)}" title="${escAttr(group.host)}">${escHtml(group.host)}${sharedTag}${confidenceTag}</span>
+				<span class="route-host" data-host="${escAttr(group.host)}" title="${escAttr(hostTitle)}">${escHtml(group.host)}${issueTag}${sharedTag}${confidenceTag}</span>
 			</div>
-			<div class="route-chain-line">${chainHtml}</div>`
+			<div class="route-chain-line${isIssue ? ' issue' : ''}">${chainHtml}</div>`
 
-		if (ruleStr) {
+		if (!isIssue && ruleStr) {
 			html += `<div class="route-rule-line" data-rule="${escAttr(group.rule)}" data-rule-payload="${escAttr(group.rulePayload || '')}">${escHtml(ruleStr)}</div>`
 		}
 
@@ -725,6 +843,20 @@ function updateRoutingDisplay(data) {
 function renderChain(chain) {
 	const items = Array.isArray(chain) && chain.length > 0 ? [...chain].reverse() : ['DIRECT']
 	return items.map(renderChainToken).join(' <span class="route-chain-token">→</span> ')
+}
+
+function renderIssueLine(group) {
+	if (group.kind === 'failed') {
+		return `<span class="route-chain-token">${escHtml(formatRequestError(group.error) || '请求失败')}</span>`
+	}
+	const port = group.destinationPort ? `:${group.destinationPort}` : ''
+	return `<span class="route-chain-token">未匹配到活动链路${escHtml(port)}</span>`
+}
+
+function formatRequestError(error) {
+	const value = String(error || '').trim()
+	if (!value) return ''
+	return value.replace(/^net::/i, '')
 }
 
 function renderChainToken(name) {
