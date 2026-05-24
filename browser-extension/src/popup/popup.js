@@ -15,6 +15,9 @@ import {
 	getProxySnapshot,
 	getProxyProviders,
 	setProxySelector,
+	closeConnection,
+	ensureIpCheckLocalConfig,
+	ensureIpCheckRemoteConfig,
 } from '../utils/api.js'
 import {
 	DEFAULT_PROXY_TYPE,
@@ -47,11 +50,35 @@ const state = {
 	editingRule: null,
 	ruleGeoContext: { host: '', destinationIps: [] },
 	currentSelector: '',
+	currentSelectorRouteKey: '',
+	currentIpCheckKey: '',
 	routingData: null,
 	proxyPanelCollapsed: false,
 	proxyPanelTouched: false,
 	geoSuggestionSeq: 0,
+	ipCheckByGroupKey: {},
 }
+
+const IPCHECK_GROUP_NAME = 'IpCheck'
+const IPCHECK_USERNAME = 'IpCheck'
+const IPCHECK_DEFAULT_PASSWORD = 'submagic-ipcheck'
+const IPCHECK_RULE_DOMAINS = [
+	'ip.sb',
+	'api.ip.sb',
+	'ipapi.is',
+	'chatgpt.com',
+	'openai.com',
+	'claude.ai',
+	'anthropic.com',
+	'gemini.google.com',
+	'google.com',
+	'youtube.com',
+	'netflix.com',
+	'disneyplus.com',
+	'dssott.com',
+	'primevideo.com',
+	'ipv6.netflix.com',
+]
 
 let pollTimer = null
 let proxyRefreshTimer = null
@@ -68,6 +95,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 	document.getElementById('btn-delete-rule').addEventListener('click', handleDeleteRule)
 	document.getElementById('btn-back-routing').addEventListener('click', showRoutingPanel)
 	document.getElementById('btn-back-selector').addEventListener('click', showRoutingPanel)
+	document.getElementById('btn-back-ipcheck').addEventListener('click', showRoutingPanel)
 	document.getElementById('btn-settings').addEventListener('click', () => chrome.runtime.openOptionsPage())
 	document.getElementById('btn-control-panel').addEventListener('click', openControlPanel)
 	document.getElementById('btn-apply-proxy').addEventListener('click', handleApplyProxy)
@@ -612,14 +640,40 @@ function handleBackgroundResponse(resp) {
 }
 
 function buildRoutingGroupKey(group) {
-	return [
+	return JSON.stringify([
 		group.kind || 'matched',
 		group.host || '',
 		group.destinationPort || '',
 		group.rule || '',
 		group.rulePayload || '',
 		group.error || '',
-	].join('\0')
+	])
+}
+
+function getIpCheckState(group) {
+	return state.ipCheckByGroupKey[buildRoutingGroupKey(group)] || null
+}
+
+function setIpCheckState(group, value) {
+	const key = buildRoutingGroupKey(group)
+	state.ipCheckByGroupKey[key] = value
+	if (state.currentIpCheckKey === key && document.getElementById('ipcheck-section').style.display !== 'none') {
+		renderIpCheckPanel(group)
+	}
+}
+
+function getIpCheckButtonLabel(entry) {
+	if (!entry) return 'IpCheck'
+	if (entry.status === 'configuring') return '配置中...'
+	if (entry.status === 'probing') return '检测中...'
+	if (entry.status === 'error') return '重试'
+	return '再测一次'
+}
+
+function renderIpCheckBlock(group) {
+	const entry = getIpCheckState(group)
+	const disabled = entry && (entry.status === 'configuring' || entry.status === 'probing') ? ' disabled' : ''
+	return `<div class="ipcheck-actions"><button class="btn btn-secondary btn-ipcheck" data-route-key="${escAttr(buildRoutingGroupKey(group))}"${disabled}>${escHtml(getIpCheckButtonLabel(entry))}</button></div>`
 }
 
 function mergeRoutingData(data) {
@@ -797,7 +851,7 @@ function updateRoutingDisplay(data) {
 	for (const group of groups) {
 		const isIssue = group.kind === 'failed' || group.kind === 'unmatched'
 		const ruleStr = group.rule ? formatRule(group.rule, group.rulePayload) : ''
-		const chainHtml = isIssue ? renderIssueLine(group) : renderChain(group.chain)
+		const chainHtml = isIssue ? renderIssueLine(group) : renderChain(group.chain, group)
 		const sharedTag = group.shared ? '<span class="route-shared-tag" title="此连接可能与其他Tab共享">共享</span>' : ''
 		const confidenceLabel = group.confidence === 'high' ? '高' : group.confidence === 'medium' ? '中' : '低'
 		const confidenceTag = !isIssue
@@ -820,6 +874,10 @@ function updateRoutingDisplay(data) {
 
 		if (!isIssue && ruleStr) {
 			html += `<div class="route-rule-line" data-rule="${escAttr(group.rule)}" data-rule-payload="${escAttr(group.rulePayload || '')}">${escHtml(ruleStr)}</div>`
+		}
+
+		if (!isIssue) {
+			html += renderIpCheckBlock(group)
 		}
 
 		html += '</div>'
@@ -846,13 +904,447 @@ function updateRoutingDisplay(data) {
 	})
 
 	resultEl.querySelectorAll('.route-chain-selector').forEach(el => {
-		el.addEventListener('click', () => openSelectorPanel(el.getAttribute('data-proxy') || ''))
+		el.addEventListener('click', () => openSelectorPanel(
+			el.getAttribute('data-proxy') || '',
+			el.getAttribute('data-route-key') || ''
+		))
+	})
+
+	resultEl.querySelectorAll('.btn-ipcheck').forEach((el) => {
+		el.addEventListener('click', () => {
+			const routeKey = el.getAttribute('data-route-key') || ''
+			const group = groups.find((item) => buildRoutingGroupKey(item) === routeKey)
+			if (group) {
+				openIpCheckPanel(group, `${group.host || 'IpCheck'} · ${resolveIpCheckTarget(group.chain) || '-'}`)
+				void handleIpCheck(group)
+			}
+		})
 	})
 }
 
-function renderChain(chain) {
+function renderChain(chain, group) {
 	const items = Array.isArray(chain) && chain.length > 0 ? [...chain].reverse() : ['DIRECT']
-	return items.map(renderChainToken).join(' <span class="route-chain-token">→</span> ')
+	const routeKey = group ? buildRoutingGroupKey(group) : ''
+	return items.map((item) => renderChainToken(item, routeKey)).join(' <span class="route-chain-token">→</span> ')
+}
+
+function resolveIpCheckTarget(chain) {
+	const items = Array.isArray(chain) ? chain.map((item) => String(item || '').trim()).filter(Boolean) : []
+	return String(items[0] || '').trim()
+}
+
+function openIpCheckPanel(group, title = '') {
+	const routeKey = buildRoutingGroupKey(group)
+	state.currentIpCheckKey = routeKey
+	document.getElementById('routing-section').style.display = 'none'
+	document.getElementById('rule-section').style.display = 'none'
+	document.getElementById('selector-section').style.display = 'none'
+	document.getElementById('ipcheck-section').style.display = ''
+	document.getElementById('ipcheck-panel-title').textContent = title || group.host || 'IpCheck'
+	renderIpCheckPanel(group)
+}
+
+function renderIpCheckPanel(group) {
+	const entry = getIpCheckState(group)
+	const metaEl = document.getElementById('ipcheck-meta')
+	const resultEl = document.getElementById('ipcheck-result')
+	const targetGroup = resolveIpCheckTarget(group.chain)
+	const chainText = Array.isArray(group.chain) && group.chain.length > 0 ? [...group.chain].reverse().join(' -> ') : 'DIRECT'
+
+	metaEl.innerHTML = `目标域名: <strong>${escHtml(group.host || '-')}</strong><br>目标代理: <strong>${escHtml(targetGroup || '-')}</strong><br>当前链路: <strong>${escHtml(chainText)}</strong>`
+
+	if (!entry) {
+		resultEl.innerHTML = '<div class="selector-empty">准备开始检测...</div>'
+		return
+	}
+
+	if (entry.status === 'configuring' || entry.status === 'probing') {
+		resultEl.innerHTML = `<div class="ipcheck-result">${escHtml(entry.message || '处理中...')}</div>`
+		return
+	}
+
+	if (entry.status === 'error') {
+		resultEl.innerHTML = `<div class="ipcheck-result error">${escHtml(entry.message || '检测失败')}</div>`
+		return
+	}
+
+	const tags = Array.isArray(entry.tags) && entry.tags.length > 0 ? entry.tags.join(' / ') : '无'
+	const location = [entry.countryCode || entry.country, entry.city].filter(Boolean).join(' ')
+	const details = entry.details || {}
+	const services = entry.services || {}
+	const references = entry.references || {}
+	const mapRows = (rows) => rows.map(([label, value]) => `<div class="ipcheck-row"><span>${escHtml(label)}</span><strong>${escHtml(value || '-')}</strong></div>`).join('')
+	const renderMatrix = (columns, rows) => `
+		<div class="ipcheck-matrix">
+			<div class="ipcheck-matrix-row header">
+				<div class="ipcheck-matrix-cell label"></div>
+				${columns.map((column) => `<div class="ipcheck-matrix-cell">${escHtml(column)}</div>`).join('')}
+			</div>
+			${rows.map((row) => `
+				<div class="ipcheck-matrix-row">
+					<div class="ipcheck-matrix-cell label">${escHtml(row.label)}</div>
+					${row.values.map((value) => `<div class="ipcheck-matrix-cell">${escHtml(value || '-')}</div>`).join('')}
+				</div>
+			`).join('')}
+		</div>
+	`
+	const formatServiceStatus = (service) => {
+		if (!service) return '未知'
+		const label = service.status === 'available'
+			? '可用'
+			: service.status === 'blocked'
+				? '不可用'
+				: '待确认'
+		return `${label}${service.detail ? ` · ${service.detail}` : ''}`
+	}
+	const buildReferenceValue = (source, values) => {
+		if (!source) return '不可用'
+		return values.map((value) => source[value]).filter(Boolean).join(' / ') || '无'
+	}
+	const yesNoUnknown = (value) => value === true ? '是' : value === false ? '否' : '无'
+	const qualitySecurity = entry.raw?.quality?.security || {}
+	const qualityCompany = entry.raw?.quality?.company || {}
+	const riskMatrix = renderMatrix(
+		['ipapi.is', 'IPinfo', 'ipapi.co', 'DB-IP'],
+		[
+			{
+				label: '地区',
+				values: [
+					entry.countryCode || entry.country || '无',
+					references.ipinfo?.country || '无',
+					references.ipapiCo?.country || '无',
+					references.dbIp?.country || '无',
+				],
+			},
+			{
+				label: '代理',
+				values: [
+					details.proxy || '无',
+					yesNoUnknown(references.ipinfo?.privacy?.proxy),
+					'无',
+					'无',
+				],
+			},
+			{
+				label: 'Tor',
+				values: [
+					details.tor || '无',
+					yesNoUnknown(references.ipinfo?.privacy?.tor),
+					'无',
+					'无',
+				],
+			},
+			{
+				label: 'VPN',
+				values: [
+					details.vpn || '无',
+					yesNoUnknown(references.ipinfo?.privacy?.vpn),
+					'无',
+					'无',
+				],
+			},
+			{
+				label: '服务器',
+				values: [
+					details.datacenter || '无',
+					yesNoUnknown(references.ipinfo?.privacy?.hosting),
+					'无',
+					'无',
+				],
+			},
+			{
+				label: '移动网络',
+				values: [
+					details.mobile || '无',
+					yesNoUnknown(references.ipinfo?.privacy?.mobile),
+					'无',
+					'无',
+				],
+			},
+			{
+				label: 'Crawler',
+				values: [
+					details.crawler || '无',
+					'无',
+					'无',
+					'无',
+				],
+			},
+		]
+	)
+	const typeMatrix = renderMatrix(
+		['ipapi.is', 'IPinfo', 'ipapi.co', 'DB-IP'],
+		[
+			{
+				label: '使用类型',
+				values: [
+					details.usageType || '其他',
+					references.ipinfo?.company?.type || '其他',
+					'其他',
+					'其他',
+				],
+			},
+			{
+				label: '公司类型',
+				values: [
+					qualityCompany?.type || '其他',
+					references.ipinfo?.company?.type || '其他',
+					'其他',
+					'其他',
+				],
+			},
+			{
+				label: '风险分数',
+				values: [
+					details.fraudScore || '无',
+					'无',
+					'无',
+					'无',
+				],
+			},
+			{
+				label: '隐私类型',
+				values: [
+					qualitySecurity?.type || details.networkType || '无',
+					[
+						references.ipinfo?.privacy?.proxy ? 'proxy' : '',
+						references.ipinfo?.privacy?.vpn ? 'vpn' : '',
+						references.ipinfo?.privacy?.tor ? 'tor' : '',
+						references.ipinfo?.privacy?.hosting ? 'hosting' : '',
+					].filter(Boolean).join('/') || '无',
+					'residential/unknown',
+					'无',
+				],
+			},
+		]
+	)
+	resultEl.innerHTML = `
+		<div class="ipcheck-result success">
+			<div class="ipcheck-group">
+				<div class="ipcheck-group-title">基础信息</div>
+				${mapRows([
+					['IP', entry.ip || '-'],
+					['地区', location || '未知'],
+					['洲', details.continent || '-'],
+					['区域', details.region || '-'],
+					['邮编', details.postal || '-'],
+					['时区', details.timezone || '-'],
+				])}
+			</div>
+			<div class="ipcheck-group">
+				<div class="ipcheck-group-title">网络质量</div>
+				${mapRows([
+					['风险', entry.risk || '未知'],
+					['标签', tags],
+					['网络类型', details.networkType || '-'],
+					['Fraud Score', details.fraudScore || '-'],
+					['近期滥用', details.abuseRecent || '-'],
+					['滥用频率', details.abuseVelocity || '-'],
+				])}
+			</div>
+			<div class="ipcheck-group">
+				<div class="ipcheck-group-title">身份判定</div>
+				${mapRows([
+					['Proxy', details.proxy || '-'],
+					['VPN', details.vpn || '-'],
+					['Tor', details.tor || '-'],
+					['机房', details.datacenter || '-'],
+					['移动网络', details.mobile || '-'],
+					['Crawler', details.crawler || '-'],
+				])}
+			</div>
+			<div class="ipcheck-group">
+				<div class="ipcheck-group-title">ASN / 运营商</div>
+				${mapRows([
+					['ASN', entry.asn ? `AS${entry.asn}` : '-'],
+					['运营商', entry.isp || '-'],
+					['组织', details.asnOrg || '-'],
+					['域名', details.asnDomain || '-'],
+					['路由', details.asnRoute || '-'],
+					['用途', details.usageType || '-'],
+				])}
+			</div>
+			<div class="ipcheck-group">
+				<div class="ipcheck-group-title">多库交叉画像</div>
+				${mapRows([
+					['IPinfo', buildReferenceValue(references.ipinfo, ['country', 'region', 'city', 'org'])],
+					['ipapi.co', buildReferenceValue(references.ipapiCo, ['country', 'region', 'city', 'org'])],
+					['DB-IP', buildReferenceValue(references.dbIp, ['country', 'region', 'city'])],
+					['坐标', [
+						references.ipapiCo?.latitude && references.ipapiCo?.longitude ? `${references.ipapiCo.latitude}, ${references.ipapiCo.longitude}` : '',
+						references.ipinfo?.loc || '',
+					].filter(Boolean).join(' / ') || '-'],
+					['地图', (() => {
+						const loc = references.ipapiCo?.latitude && references.ipapiCo?.longitude
+							? `${references.ipapiCo.latitude},${references.ipapiCo.longitude}`
+							: references.ipinfo?.loc || ''
+						return loc ? `https://www.google.com/maps?q=${loc}` : '-'
+					})()],
+				])}
+			</div>
+			<div class="ipcheck-group">
+				<div class="ipcheck-group-title">类型对照矩阵</div>
+				${typeMatrix}
+			</div>
+			<div class="ipcheck-group">
+				<div class="ipcheck-group-title">风险因子矩阵</div>
+				${riskMatrix}
+			</div>
+			<div class="ipcheck-group">
+				<div class="ipcheck-group-title">AI 服务</div>
+				${mapRows([
+					['ChatGPT', formatServiceStatus(services.chatgpt)],
+					['OpenAI', formatServiceStatus(services.openai)],
+					['Claude', formatServiceStatus(services.claude)],
+					['Gemini', formatServiceStatus(services.gemini)],
+				])}
+			</div>
+			<div class="ipcheck-group">
+				<div class="ipcheck-group-title">流媒体</div>
+				${mapRows([
+					['YouTube Premium', formatServiceStatus(services.youtubePremium)],
+					['Netflix', formatServiceStatus(services.netflix)],
+					['Disney+', formatServiceStatus(services.disneyPlus)],
+					['Prime Video', formatServiceStatus(services.primeVideo)],
+				])}
+			</div>
+			<details class="ipcheck-raw">
+				<summary>原始返回</summary>
+				<pre>${escHtml(JSON.stringify(entry.raw || {}, null, 2))}</pre>
+			</details>
+		</div>
+	`
+}
+
+function getIpCheckBaseProfile() {
+	const draftProfile = {
+		proxyType: getSelectedProxyType() || state.proxyProfile?.proxyType || DEFAULT_PROXY_TYPE,
+		host: getMihomoHost(),
+		port: 0,
+		listenerName: getSelectedPortOption()?.listenerName || state.proxyProfile?.listenerName || '',
+		source: getSelectedPortOption()?.source || state.proxyProfile?.source || 'config',
+		authUser: { username: IPCHECK_USERNAME, password: IPCHECK_DEFAULT_PASSWORD },
+	}
+	const validation = buildProxyValidation(draftProfile)
+	if (!validation.ok) {
+		throw new Error(validation.reason)
+	}
+	return {
+		...draftProfile,
+		enabled: true,
+		host: validation.host,
+		port: validation.port,
+		listenerName: validation.listenerName,
+		source: validation.source,
+	}
+}
+
+async function resolveIpCheckPassword() {
+	if (!state.mihomo.url) return IPCHECK_DEFAULT_PASSWORD
+	try {
+		const configs = (await getMihomoConfigs(state.mihomo.url, state.mihomo.secret)) || {}
+		const entries = Array.isArray(configs.authentication) ? configs.authentication : []
+		for (const entry of entries) {
+			if (typeof entry !== 'string') continue
+			const separatorIndex = entry.indexOf(':')
+			if (separatorIndex === -1) continue
+			const username = entry.slice(0, separatorIndex).trim()
+			if (username !== IPCHECK_USERNAME) continue
+			return entry.slice(separatorIndex + 1) || IPCHECK_DEFAULT_PASSWORD
+		}
+	} catch {}
+	return IPCHECK_DEFAULT_PASSWORD
+}
+
+async function ensureIpCheckConfig(targetGroup, password) {
+	const messages = []
+	const remoteEnabled = !!(state.subMagic.url && state.subMagic.accessKey)
+
+	if (remoteEnabled) {
+		try {
+			const remoteResult = await ensureIpCheckRemoteConfig(state.subMagic.url, state.subMagic.accessKey, {
+				targetGroup,
+				username: IPCHECK_USERNAME,
+				password,
+				groupName: IPCHECK_GROUP_NAME,
+				domains: IPCHECK_RULE_DOMAINS,
+			})
+			if (remoteResult.changed) {
+				messages.push('远程配置已补齐')
+			}
+			password = remoteResult.authUser?.password || password
+		} catch (error) {
+			messages.push(`远程持久化失败: ${error.message}`)
+		}
+	}
+
+	const localResult = await ensureIpCheckLocalConfig(state.mihomo.url, state.mihomo.secret, {
+		targetGroup,
+		username: IPCHECK_USERNAME,
+		password,
+		groupName: IPCHECK_GROUP_NAME,
+		domains: IPCHECK_RULE_DOMAINS,
+	})
+	password = localResult.authUser?.password || password
+	if (localResult.changed) {
+		messages.push('本地配置已补齐')
+	}
+
+	return {
+		authUser: { username: IPCHECK_USERNAME, password },
+		messages,
+	}
+}
+
+async function handleIpCheck(group) {
+	const targetGroup = resolveIpCheckTarget(group.chain)
+	if (!targetGroup || targetGroup === 'DIRECT') {
+		setIpCheckState(group, { status: 'error', message: '当前链路没有可检测的代理组' })
+		updateRoutingDisplay(state.routingData || { groups: [] })
+		return
+	}
+	if (!state.mihomo.url) {
+		setIpCheckState(group, { status: 'error', message: '请先配置 Mihomo API' })
+		updateRoutingDisplay(state.routingData || { groups: [] })
+		return
+	}
+
+	try {
+		const baseProfile = getIpCheckBaseProfile()
+		setIpCheckState(group, { status: 'configuring', message: `准备 ${targetGroup} 的 IpCheck 配置...` })
+		updateRoutingDisplay(state.routingData || { groups: [] })
+
+		const ipCheckPassword = await resolveIpCheckPassword()
+		const ensured = await ensureIpCheckConfig(targetGroup, ipCheckPassword)
+		await setProxySelector(state.mihomo.url, state.mihomo.secret, IPCHECK_GROUP_NAME, targetGroup)
+		await refreshProxyData()
+
+		setIpCheckState(group, {
+			status: 'probing',
+			message: ensured.messages.length > 0 ? `${ensured.messages.join('；')}，开始检测...` : '开始检测...',
+		})
+		updateRoutingDisplay(state.routingData || { groups: [] })
+
+		const result = await chrome.runtime.sendMessage({
+			type: 'IPCHECK_PROBE',
+			profile: baseProfile,
+			authUser: ensured.authUser,
+		})
+
+		if (!result?.ok) {
+			throw new Error(result?.error || 'IP 检测失败')
+		}
+
+		setIpCheckState(group, {
+			status: 'success',
+			...result,
+			targetGroup,
+		})
+		updateRoutingDisplay(state.routingData || { groups: [] })
+	} catch (error) {
+		setIpCheckState(group, { status: 'error', message: error.message || 'IP 检测失败' })
+		updateRoutingDisplay(state.routingData || { groups: [] })
+	}
 }
 
 function renderIssueLine(group) {
@@ -869,10 +1361,10 @@ function formatRequestError(error) {
 	return value.replace(/^net::/i, '')
 }
 
-function renderChainToken(name) {
+function renderChainToken(name, routeKey = '') {
 	const proxy = state.proxyMap[name]
 	if (proxy?.type === 'Selector') {
-		return `<button class="route-chain-token route-chain-selector" data-proxy="${escAttr(name)}" title="点击选择 ${escAttr(name)} 的下游链路">${escHtml(name)}</button>`
+		return `<button class="route-chain-token route-chain-selector" data-proxy="${escAttr(name)}" data-route-key="${escAttr(routeKey)}" title="点击选择 ${escAttr(name)} 的下游链路">${escHtml(name)}</button>`
 	}
 	return `<span class="route-chain-token">${escHtml(name)}</span>`
 }
@@ -881,15 +1373,82 @@ function showRoutingPanel() {
 	document.getElementById('routing-section').style.display = state.mihomo.url ? '' : 'none'
 	document.getElementById('rule-section').style.display = 'none'
 	document.getElementById('selector-section').style.display = 'none'
+	document.getElementById('ipcheck-section').style.display = 'none'
 	state.ruleMode = null
 	state.editingRule = null
 	state.currentSelector = ''
+	state.currentSelectorRouteKey = ''
+	state.currentIpCheckKey = ''
+}
+
+async function returnToRoutingAndReloadTab() {
+	showRoutingPanel()
+	resetRoutingDisplay()
+	if (state.tabId > 0 && chrome.tabs?.reload) {
+		await chrome.tabs.reload(state.tabId)
+	}
+}
+
+function normalizeConnectionIdList(values) {
+	return [...new Set((Array.isArray(values) ? values : [])
+		.map((value) => String(value || '').trim())
+		.filter(Boolean))]
+}
+
+function collectConnectionIdsForGroups(groups) {
+	return normalizeConnectionIdList(
+		(groups || []).flatMap((group) => Array.isArray(group?.connectionIds) ? group.connectionIds : [])
+	)
+}
+
+function matchesRuleDescriptor(group, descriptor) {
+	if (!descriptor?.type) return false
+	const groupType = String(group?.rule || '').trim().toUpperCase()
+	if (groupType !== descriptor.type) return false
+	if (descriptor.type === 'MATCH') return true
+	return String(group?.rulePayload || '').trim() === String(descriptor.payload || '').trim()
+}
+
+function collectAffectedConnectionIdsForRuleChange(oldRule = '', newRule = '') {
+	const groups = Array.isArray(state.routingData?.groups) ? state.routingData.groups : []
+	if (groups.length === 0) return []
+
+	const oldDescriptor = parseRuleDisplay(oldRule)
+	const newDescriptor = parseRuleDisplay(newRule)
+	const targetHost = normalizeRuleHost(state.ruleGeoContext?.host || state.domain || '')
+
+	const matchedGroups = groups.filter((group) => {
+		if (group?.kind && group.kind !== 'matched') return false
+		if (matchesRuleDescriptor(group, oldDescriptor) || matchesRuleDescriptor(group, newDescriptor)) {
+			return true
+		}
+		const groupHost = normalizeRuleHost(group?.host || '')
+		return !!targetHost && groupHost === targetHost
+	})
+
+	return collectConnectionIdsForGroups(matchedGroups)
+}
+
+async function closeConnectionsByIds(connectionIds) {
+	const ids = normalizeConnectionIdList(connectionIds)
+	if (ids.length === 0) return { total: 0, closed: 0, failed: 0 }
+
+	const results = await Promise.allSettled(
+		ids.map((connectionId) => closeConnection(state.mihomo.url, state.mihomo.secret, connectionId))
+	)
+
+	return {
+		total: ids.length,
+		closed: results.filter((result) => result.status === 'fulfilled').length,
+		failed: results.filter((result) => result.status === 'rejected').length,
+	}
 }
 
 async function showAddPanel(domain, destinationIps = []) {
 	debugRuleEdit('showAddPanel', { domain, destinationIps, fallbackDomain: state.domain })
 	document.getElementById('routing-section').style.display = 'none'
 	document.getElementById('selector-section').style.display = 'none'
+	document.getElementById('ipcheck-section').style.display = 'none'
 	document.getElementById('rule-section').style.display = ''
 	document.getElementById('rule-panel-title').textContent = '添加规则'
 	document.getElementById('btn-group-add').style.display = ''
@@ -917,6 +1476,7 @@ async function showEditPanel(ruleStr) {
 	debugRuleEdit('showEditPanel:start', { ruleStr })
 	document.getElementById('routing-section').style.display = 'none'
 	document.getElementById('selector-section').style.display = 'none'
+	document.getElementById('ipcheck-section').style.display = 'none'
 	document.getElementById('rule-section').style.display = ''
 	document.getElementById('rule-panel-title').textContent = '修改规则'
 	document.getElementById('btn-group-add').style.display = 'none'
@@ -947,12 +1507,14 @@ async function showEditPanel(ruleStr) {
 	})
 }
 
-async function openSelectorPanel(proxyName) {
+async function openSelectorPanel(proxyName, routeKey = '') {
 	if (!proxyName) return
 
 	state.currentSelector = proxyName
+	state.currentSelectorRouteKey = routeKey
 	document.getElementById('routing-section').style.display = 'none'
 	document.getElementById('rule-section').style.display = 'none'
+	document.getElementById('ipcheck-section').style.display = 'none'
 	document.getElementById('selector-section').style.display = ''
 	document.getElementById('selector-panel-title').textContent = proxyName
 	document.getElementById('selector-meta').innerHTML = '<span class="spinner"></span>加载链路中...'
@@ -1028,10 +1590,21 @@ async function handleSelectorResultClick(event) {
 
 	try {
 		await setProxySelector(state.mihomo.url, state.mihomo.secret, proxyName, targetName)
+		const currentGroup = (state.routingData?.groups || []).find(
+			(item) => buildRoutingGroupKey(item) === state.currentSelectorRouteKey
+		)
+		const connectionIds = Array.isArray(currentGroup?.connectionIds) ? currentGroup.connectionIds : []
+		const closeSummary = await closeConnectionsByIds(connectionIds)
 		await refreshProxyData()
 		renderSelectorPanel(proxyName)
 		const proxy = state.proxyMap[proxyName]
-		metaEl.innerHTML = `类型: <strong>${escHtml(proxy?.type || '-')}</strong><br>当前选择: <strong>${escHtml(proxy?.now || targetName)}</strong><br>已切换成功`
+		const closeMessage = connectionIds.length > 0
+			? closeSummary.failed > 0
+				? `已关闭 ${closeSummary.closed}/${closeSummary.total} 条现有连接`
+				: `已关闭 ${closeSummary.closed} 条现有连接`
+			: '未找到可关闭的现有连接'
+		metaEl.innerHTML = `类型: <strong>${escHtml(proxy?.type || '-')}</strong><br>当前选择: <strong>${escHtml(proxy?.now || targetName)}</strong><br>已切换成功<br>${escHtml(closeMessage)}`
+		await returnToRoutingAndReloadTab()
 	} catch (error) {
 		metaEl.textContent = `切换失败: ${error.message}`
 	}
@@ -1569,6 +2142,10 @@ async function handleAddRule() {
 
 		resultEl.textContent = messages.join('\n')
 		resultEl.className = messages.some(message => message.includes('失败') || message.includes('未检测到')) ? 'result-box error' : 'result-box success'
+		if (resultEl.className === 'result-box success') {
+			await closeConnectionsByIds(collectAffectedConnectionIdsForRuleChange('', ruleStr))
+			await returnToRoutingAndReloadTab()
+		}
 	} catch (error) {
 		resultEl.textContent = `操作失败: ${error.message}`
 		resultEl.className = 'result-box error'
@@ -1610,18 +2187,21 @@ async function handleSaveRule() {
 		resultEl.className = 'result-box error'
 		return
 	}
+	const previousRuleStr = state.editingRule
 
 	resultEl.innerHTML = '<span class="spinner"></span>保存中...'
 
 	try {
-		await updateRuleRemote(state.subMagic.url, state.subMagic.accessKey, state.editingRule, newRuleStr, priorityAnchor)
+		await updateRuleRemote(state.subMagic.url, state.subMagic.accessKey, previousRuleStr, newRuleStr, priorityAnchor)
 		if (hasLocal) {
 			resultEl.innerHTML = '<span class="spinner"></span>远程修改成功，等待本地 Mihomo 生效...'
-			const verifyResult = await waitForRuleUpdate(state.mihomo.url, state.mihomo.secret, state.editingRule, newRuleStr, priorityAnchor)
+			const verifyResult = await waitForRuleUpdate(state.mihomo.url, state.mihomo.secret, previousRuleStr, newRuleStr, priorityAnchor)
 			state.editingRule = newRuleStr
 			if (verifyResult.ok) {
 				resultEl.textContent = `远程修改成功，本地 Mihomo 已生效（${verifyResult.attempts}s）`
 				resultEl.className = 'result-box success'
+				await closeConnectionsByIds(collectAffectedConnectionIdsForRuleChange(previousRuleStr, newRuleStr))
+				await returnToRoutingAndReloadTab()
 			} else {
 				resultEl.textContent = '远程修改成功，但本地 Mihomo 在 30 秒内未检测到规则生效，请手动检查订阅更新状态'
 				resultEl.className = 'result-box error'
@@ -1632,6 +2212,8 @@ async function handleSaveRule() {
 		state.editingRule = newRuleStr
 		resultEl.textContent = '远程修改成功'
 		resultEl.className = 'result-box success'
+		await closeConnectionsByIds(collectAffectedConnectionIdsForRuleChange(previousRuleStr, newRuleStr))
+		await returnToRoutingAndReloadTab()
 	} catch (error) {
 		resultEl.textContent = `远程修改失败: ${error.message}`
 		resultEl.className = 'result-box error'

@@ -17,6 +17,7 @@ let cachedSnapshots = []
 const SNAPSHOT_TTL = 30000
 
 let proxyGroups = []
+let ipCheckRunning = false
 
 const tabRequests = new Map()
 const routingPanelCache = new Map()
@@ -237,6 +238,362 @@ async function applyProxySettings() {
 		value: buildChromeProxyConfig(profile),
 		scope: 'regular',
 	})
+}
+
+async function applyTemporaryGlobalProfile(profile, task) {
+	const previousProfile = normalizeProfile(proxyState.globalProfile)
+	proxyState.globalProfile = normalizeProfile(profile)
+	await applyProxySettings()
+
+	try {
+		return await task()
+	} finally {
+		proxyState.globalProfile = previousProfile
+		await applyProxySettings()
+	}
+}
+
+function buildIpCheckSummary(ipInfo = {}) {
+	const flags = []
+	if (ipInfo.is_tor) flags.push('Tor')
+	if (ipInfo.is_proxy) flags.push('Proxy')
+	if (ipInfo.is_vpn) flags.push('VPN')
+	if (ipInfo.is_datacenter) flags.push('机房')
+
+	const companyType = String(ipInfo.company?.type || ipInfo.type || '').trim()
+	if (companyType && !flags.includes(companyType)) {
+		flags.push(companyType)
+	}
+
+	const risk = flags.length > 0 ? '高风险' : '低风险'
+	return {
+		risk,
+		tags: flags,
+	}
+}
+
+function firstNonEmpty(...values) {
+	for (const value of values) {
+		if (value === null || value === undefined) continue
+		if (typeof value === 'string' && !value.trim()) continue
+		return value
+	}
+	return ''
+}
+
+function normalizeBooleanFlag(value) {
+	if (value === true) return '是'
+	if (value === false) return '否'
+	return '未知'
+}
+
+function buildIpCheckDetails(quality = {}, geo = {}) {
+	const vpn = firstNonEmpty(quality?.is_vpn, quality?.security?.is_vpn)
+	const proxy = firstNonEmpty(quality?.is_proxy, quality?.security?.is_proxy)
+	const tor = firstNonEmpty(quality?.is_tor, quality?.security?.is_tor)
+	const datacenter = firstNonEmpty(quality?.is_datacenter, quality?.security?.is_datacenter, geo?.hosting)
+	const mobile = firstNonEmpty(quality?.is_mobile, quality?.company?.is_mobile, geo?.mobile)
+	const crawler = firstNonEmpty(quality?.is_crawler, quality?.security?.is_crawler)
+
+	return {
+		networkType: firstNonEmpty(quality?.type, quality?.company?.type, geo?.type),
+		continent: firstNonEmpty(quality?.location?.continent, geo?.continent),
+		region: firstNonEmpty(quality?.location?.state, quality?.location?.region, geo?.region),
+		city: firstNonEmpty(quality?.location?.city, geo?.city),
+		postal: firstNonEmpty(quality?.location?.zip, quality?.location?.postal_code, geo?.postal_code),
+		timezone: firstNonEmpty(quality?.location?.timezone, geo?.timezone),
+		latitude: firstNonEmpty(quality?.location?.latitude, geo?.latitude),
+		longitude: firstNonEmpty(quality?.location?.longitude, geo?.longitude),
+		asnOrg: firstNonEmpty(quality?.company?.name, geo?.isp, geo?.organization),
+		asnDomain: firstNonEmpty(quality?.company?.domain, geo?.domain),
+		asnRoute: firstNonEmpty(quality?.company?.route, geo?.cidr),
+		usageType: firstNonEmpty(quality?.company?.type, geo?.type),
+		vpn: normalizeBooleanFlag(vpn),
+		proxy: normalizeBooleanFlag(proxy),
+		tor: normalizeBooleanFlag(tor),
+		datacenter: normalizeBooleanFlag(datacenter),
+		mobile: normalizeBooleanFlag(mobile),
+		crawler: normalizeBooleanFlag(crawler),
+		fraudScore: firstNonEmpty(quality?.fraud_score, quality?.risk?.score, quality?.score),
+		abuseVelocity: firstNonEmpty(quality?.abuse?.velocity, quality?.abuse_velocity),
+		abuseRecent: firstNonEmpty(quality?.abuse?.recent, quality?.abuse_recent),
+	}
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = 8000) {
+	const controller = new AbortController()
+	const timer = setTimeout(() => controller.abort(), timeoutMs)
+	try {
+		const res = await fetch(url, { signal: controller.signal, cache: 'no-store' })
+		if (!res.ok) {
+			const text = await res.text()
+			throw new Error(`HTTP ${res.status}: ${text.slice(0, 120)}`)
+		}
+		return await res.json()
+	} finally {
+		clearTimeout(timer)
+	}
+}
+
+async function fetchTextWithTimeout(url, timeoutMs = 8000) {
+	const controller = new AbortController()
+	const timer = setTimeout(() => controller.abort(), timeoutMs)
+	try {
+		const res = await fetch(url, {
+			signal: controller.signal,
+			cache: 'no-store',
+			redirect: 'follow',
+		})
+		const text = await res.text()
+		return {
+			ok: res.ok,
+			status: res.status,
+			url: res.url,
+			text,
+		}
+	} finally {
+		clearTimeout(timer)
+	}
+}
+
+function inferServiceStatus(result, options = {}) {
+	if (!result) return { status: 'unknown', detail: '未检测' }
+	if (result.error) return { status: 'blocked', detail: result.error }
+
+	const text = String(result.text || '')
+	const finalUrl = String(result.url || '')
+	if (typeof options.match === 'function') {
+		return options.match({ ...result, text, finalUrl })
+	}
+
+	if (result.ok) return { status: 'available', detail: `HTTP ${result.status}` }
+	return { status: 'blocked', detail: `HTTP ${result.status}` }
+}
+
+async function probeServiceMatrix() {
+	const tasks = {
+		chatgpt: fetchTextWithTimeout('https://chatgpt.com/', 10000),
+		openai: fetchTextWithTimeout('https://openai.com/', 10000),
+		claude: fetchTextWithTimeout('https://claude.ai/', 10000),
+		gemini: fetchTextWithTimeout('https://gemini.google.com/app', 10000),
+		youtubePremium: fetchTextWithTimeout('https://www.youtube.com/premium', 10000),
+		netflix: fetchTextWithTimeout('https://www.netflix.com/title/81215567', 10000),
+		disneyPlus: fetchTextWithTimeout('https://www.disneyplus.com/', 10000),
+		primeVideo: fetchTextWithTimeout('https://www.primevideo.com/', 10000),
+	}
+
+	const settled = await Promise.allSettled(Object.values(tasks))
+	const entries = Object.keys(tasks).map((key, index) => {
+		const item = settled[index]
+		if (item.status === 'fulfilled') return [key, item.value]
+		return [key, { error: item.reason?.message || '请求失败' }]
+	})
+	const raw = Object.fromEntries(entries)
+
+	return {
+		chatgpt: inferServiceStatus(raw.chatgpt, {
+			match: ({ ok, status, text, finalUrl }) => {
+				if (!ok) return { status: 'blocked', detail: `HTTP ${status}` }
+				if (finalUrl.includes('/auth/error')) return { status: 'blocked', detail: '访问被拒绝' }
+				if (text.includes('ChatGPT') || text.includes('OpenAI')) return { status: 'available', detail: `HTTP ${status}` }
+				return { status: 'unknown', detail: `HTTP ${status}` }
+			},
+		}),
+		openai: inferServiceStatus(raw.openai, {
+			match: ({ ok, status, text }) => {
+				if (!ok) return { status: 'blocked', detail: `HTTP ${status}` }
+				if (text.includes('OpenAI')) return { status: 'available', detail: `HTTP ${status}` }
+				return { status: 'unknown', detail: `HTTP ${status}` }
+			},
+		}),
+		claude: inferServiceStatus(raw.claude, {
+			match: ({ ok, status, text, finalUrl }) => {
+				if (!ok) return { status: 'blocked', detail: `HTTP ${status}` }
+				if (text.includes('Claude') || finalUrl.includes('claude.ai')) return { status: 'available', detail: `HTTP ${status}` }
+				return { status: 'unknown', detail: `HTTP ${status}` }
+			},
+		}),
+		gemini: inferServiceStatus(raw.gemini, {
+			match: ({ ok, status, text, finalUrl }) => {
+				if (!ok) return { status: 'blocked', detail: `HTTP ${status}` }
+				if (finalUrl.includes('sorry') || text.includes('not available in your country')) {
+					return { status: 'blocked', detail: '地区不可用' }
+				}
+				if (text.includes('Gemini') || finalUrl.includes('gemini.google.com')) {
+					return { status: 'available', detail: `HTTP ${status}` }
+				}
+				return { status: 'unknown', detail: `HTTP ${status}` }
+			},
+		}),
+		youtubePremium: inferServiceStatus(raw.youtubePremium, {
+			match: ({ ok, status, text, finalUrl }) => {
+				if (!ok) return { status: 'blocked', detail: `HTTP ${status}` }
+				if (finalUrl.includes('/premium') && (text.includes('YouTube Premium') || text.includes('ad-free'))) {
+					return { status: 'available', detail: `HTTP ${status}` }
+				}
+				return { status: 'unknown', detail: `HTTP ${status}` }
+			},
+		}),
+		netflix: inferServiceStatus(raw.netflix, {
+			match: ({ ok, status, text, finalUrl }) => {
+				if (!ok) return { status: 'blocked', detail: `HTTP ${status}` }
+				if (text.includes('Netflix') || finalUrl.includes('netflix.com/title/')) {
+					return { status: 'available', detail: `HTTP ${status}` }
+				}
+				return { status: 'unknown', detail: `HTTP ${status}` }
+			},
+		}),
+		disneyPlus: inferServiceStatus(raw.disneyPlus, {
+			match: ({ ok, status, text, finalUrl }) => {
+				if (!ok) return { status: 'blocked', detail: `HTTP ${status}` }
+				if (text.includes('Disney+') || finalUrl.includes('disneyplus.com')) {
+					return { status: 'available', detail: `HTTP ${status}` }
+				}
+				return { status: 'unknown', detail: `HTTP ${status}` }
+			},
+		}),
+		primeVideo: inferServiceStatus(raw.primeVideo, {
+			match: ({ ok, status, text, finalUrl }) => {
+				if (!ok) return { status: 'blocked', detail: `HTTP ${status}` }
+				if (text.includes('Prime Video') || finalUrl.includes('primevideo.com')) {
+					return { status: 'available', detail: `HTTP ${status}` }
+				}
+				return { status: 'unknown', detail: `HTTP ${status}` }
+			},
+		}),
+		raw,
+	}
+}
+
+async function probeReferenceDatabases() {
+	const tasks = {
+		ipinfo: fetchJsonWithTimeout('https://ipinfo.io/json', 10000),
+		ipapiCo: fetchJsonWithTimeout('https://ipapi.co/json/', 10000),
+		dbIp: fetchJsonWithTimeout('https://api.db-ip.com/v2/free/self', 10000),
+	}
+
+	const settled = await Promise.allSettled(Object.values(tasks))
+	const entries = Object.keys(tasks).map((key, index) => {
+		const item = settled[index]
+		if (item.status === 'fulfilled') return [key, item.value]
+		return [key, { error: item.reason?.message || '请求失败' }]
+	})
+	const raw = Object.fromEntries(entries)
+
+	return {
+		ipinfo: raw.ipinfo?.error ? null : {
+			ip: raw.ipinfo?.ip || '',
+			country: raw.ipinfo?.country || '',
+			region: raw.ipinfo?.region || '',
+			city: raw.ipinfo?.city || '',
+			loc: raw.ipinfo?.loc || '',
+			org: raw.ipinfo?.org || '',
+			postal: raw.ipinfo?.postal || '',
+			timezone: raw.ipinfo?.timezone || '',
+			privacy: raw.ipinfo?.privacy || null,
+			company: raw.ipinfo?.company || null,
+		},
+		ipapiCo: raw.ipapiCo?.error ? null : {
+			ip: raw.ipapiCo?.ip || '',
+			country: raw.ipapiCo?.country_code || raw.ipapiCo?.country || '',
+			region: raw.ipapiCo?.region || '',
+			city: raw.ipapiCo?.city || '',
+			latitude: raw.ipapiCo?.latitude || '',
+			longitude: raw.ipapiCo?.longitude || '',
+			asn: raw.ipapiCo?.asn || '',
+			org: raw.ipapiCo?.org || '',
+			postal: raw.ipapiCo?.postal || '',
+			timezone: raw.ipapiCo?.timezone || '',
+			inEu: raw.ipapiCo?.in_eu ?? null,
+			countryArea: raw.ipapiCo?.country_area || '',
+			countryPopulation: raw.ipapiCo?.country_population || '',
+		},
+		dbIp: raw.dbIp?.error ? null : {
+			ip: raw.dbIp?.ipAddress || '',
+			country: raw.dbIp?.countryCode || '',
+			region: raw.dbIp?.stateProv || '',
+			city: raw.dbIp?.city || '',
+			latitude: raw.dbIp?.latitude || '',
+			longitude: raw.dbIp?.longitude || '',
+			isp: raw.dbIp?.isp || '',
+		},
+		raw,
+	}
+}
+
+async function runIpCheckProbe(payload) {
+	if (ipCheckRunning) {
+		throw new Error('已有检测任务正在执行，请稍后重试')
+	}
+
+	const baseProfile = normalizeProfile(payload?.profile)
+	if (!canApplyProfile(baseProfile)) {
+		throw new Error('当前代理配置不可用，请先启用可用的 Mihomo 代理端口')
+	}
+
+	const authUser = normalizeAuthUser(payload?.authUser)
+	if (!authUser) {
+		throw new Error('IpCheck 代理认证用户无效')
+	}
+
+	const probeProfile = normalizeProfile({
+		...baseProfile,
+		enabled: true,
+		authUser,
+	})
+
+	ipCheckRunning = true
+	try {
+		return await applyTemporaryGlobalProfile(probeProfile, async () => {
+			const [qualityRes, geoRes, serviceRes, refsRes] = await Promise.allSettled([
+				fetchJsonWithTimeout('https://ipapi.is/json'),
+				fetchJsonWithTimeout('https://api.ip.sb/geoip'),
+				probeServiceMatrix(),
+				probeReferenceDatabases(),
+			])
+
+			const quality = qualityRes.status === 'fulfilled' ? qualityRes.value : null
+			const geo = geoRes.status === 'fulfilled' ? geoRes.value : null
+			const services = serviceRes.status === 'fulfilled' ? serviceRes.value : null
+			const references = refsRes.status === 'fulfilled' ? refsRes.value : null
+			if (!quality && !geo) {
+				const firstError = qualityRes.status === 'rejected' ? qualityRes.reason : geoRes.reason
+				throw new Error(firstError?.message || 'IP 检测失败')
+			}
+
+			const ip = quality?.ip || geo?.ip || ''
+			const country = quality?.location?.country || geo?.country || ''
+			const countryCode = quality?.location?.country_code || geo?.country_code || ''
+			const city = quality?.location?.city || geo?.city || ''
+			const asn = quality?.company?.asn || geo?.asn || ''
+			const isp = quality?.company?.name || geo?.isp || geo?.organization || ''
+			const summary = buildIpCheckSummary(quality || {})
+			const details = buildIpCheckDetails(quality || {}, geo || {})
+
+			return {
+				ok: true,
+				ip,
+				country,
+				countryCode,
+				city,
+				asn,
+				isp,
+				risk: summary.risk,
+				tags: summary.tags,
+				details,
+				services,
+				references,
+				raw: {
+					quality,
+					geo,
+					services: services?.raw || null,
+					references: references?.raw || null,
+				},
+			}
+		})
+	} finally {
+		ipCheckRunning = false
+	}
 }
 
 function buildFirefoxProxyInfo(profile, tabId) {
@@ -603,6 +960,7 @@ function logMergedGroups(tabId, groups, totalConnections, issueTotal) {
 		host: group.host || '',
 		port: group.destinationPort || '',
 		destinationIps: Array.isArray(group.destinationIps) ? group.destinationIps : [],
+		connectionIds: Array.isArray(group.connectionIds) ? group.connectionIds : [],
 		count: group.count || 0,
 		rule: group.rule || '',
 		error: group.error || '',
@@ -669,10 +1027,12 @@ function getMergedGroups(tabId) {
 			const key = `${host}\0${destinationPort}\0${rule}`
 			if (!allConns.has(key)) {
 				const chain = c.chains || c.chain || []
+				const connectionId = String(c.id || '').trim()
 				allConns.set(key, {
 					host,
 					destinationPort,
 					destinationIps: destinationIp ? [destinationIp] : [],
+					connectionIds: connectionId ? [connectionId] : [],
 					rule,
 					count: 0,
 					chain: Array.isArray(chain) ? chain : [],
@@ -692,6 +1052,10 @@ function getMergedGroups(tabId) {
 				if (group.destinationIps.length > 6) {
 					group.destinationIps = group.destinationIps.slice(0, 6)
 				}
+			}
+			const connectionId = String(c.id || '').trim()
+			if (connectionId && !group.connectionIds.includes(connectionId)) {
+				group.connectionIds.push(connectionId)
 			}
 			group.owned = group.owned || owned
 			group.shared = group.shared || shared
@@ -985,6 +1349,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 			}
 			await applyProxySettings()
 			sendResponse(serializeProxyState(tabId))
+		})()
+		return true
+	}
+
+	if (msg.type === 'IPCHECK_PROBE') {
+		;(async () => {
+			try {
+				const result = await runIpCheckProbe(msg)
+				sendResponse(result)
+			} catch (error) {
+				sendResponse({ ok: false, error: error.message || 'IP 检测失败' })
+			}
 		})()
 		return true
 	}

@@ -142,6 +142,10 @@ function getInsertIndex(currentRules, previousRule = '') {
 	return previousIdx === -1 ? currentRules.length : previousIdx + 1
 }
 
+function getMatchRuleIndex(currentRules) {
+	return currentRules.findIndex((rule) => parseRuleDisplay(rule).type === 'MATCH')
+}
+
 function isRulePrioritySatisfied(currentRules, ruleStr, previousRule = '') {
 	const ruleIdx = currentRules.indexOf(ruleStr)
 	if (ruleIdx === -1) return false
@@ -256,6 +260,167 @@ export async function getMihomoConfigs(url, secret) {
 	return mihomoFetch(url, secret, '/configs')
 }
 
+function normalizeAuthUsers(authentication) {
+	if (!Array.isArray(authentication)) return []
+	return authentication
+		.map((entry) => {
+			if (typeof entry !== 'string') return null
+			const separatorIndex = entry.indexOf(':')
+			if (separatorIndex === -1) return null
+			const username = entry.slice(0, separatorIndex).trim()
+			const password = entry.slice(separatorIndex + 1)
+			return username ? { username, password } : null
+		})
+		.filter(Boolean)
+}
+
+function serializeAuthUsers(users) {
+	return users.map((user) => `${user.username}:${user.password}`)
+}
+
+function buildIpCheckRuleProvider(domains) {
+	return {
+		type: 'inline',
+		behavior: 'classical',
+		format: 'yaml',
+		payload: ensureUniqueValues(domains).map((domain) => `DOMAIN-SUFFIX,${domain}`),
+	}
+}
+
+function buildIpCheckRule(providerName = 'IpCheck', groupName = 'IpCheck', username = 'IpCheck') {
+	return `AND,((IN-USER,${username}),(RULE-SET,${providerName})),${groupName}`
+}
+
+function ensureUniqueValues(values) {
+	return [...new Set((values || []).map((value) => String(value || '').trim()).filter(Boolean))]
+}
+
+function findIpCheckRuleAnchor(currentRules) {
+	let anchor = ''
+	for (const rule of currentRules) {
+		const parsed = parseRuleDisplay(rule)
+		if (parsed.type !== 'GEOIP') continue
+		const payload = String(parsed.payload || '').trim().toUpperCase()
+		if (payload === 'LAN' || payload === 'PRIVATE') {
+			anchor = rule
+		}
+	}
+	return anchor
+}
+
+function removeManagedIpCheckRules(currentRules, providerName = 'IpCheck', groupName = 'IpCheck', username = 'IpCheck') {
+	const canonicalRule = buildIpCheckRule(providerName, groupName, username)
+	return currentRules.filter((rule) => {
+		const normalized = String(rule || '').trim()
+		if (!normalized) return false
+		if (normalized === canonicalRule) return false
+		if (normalized.includes(`IN-USER,${username}`) && normalized.endsWith(`,${groupName}`)) return false
+		if (normalized.startsWith(`RULE-SET,${providerName},`) && normalized.endsWith(`,${groupName}`)) return false
+		return true
+	})
+}
+
+function insertRuleWithAnchor(currentRules, rule, anchor = '') {
+	const nextRules = [...currentRules]
+	const insertIdx = anchor ? getInsertIndex(nextRules, anchor) : 0
+	nextRules.splice(insertIdx, 0, rule)
+	return nextRules
+}
+
+export async function ensureIpCheckLocalConfig(mihomoUrl, secret, options = {}) {
+	const targetGroup = String(options.targetGroup || '').trim()
+	const username = String(options.username || 'IpCheck').trim()
+	const password = String(options.password || '').trim()
+	const groupName = String(options.groupName || 'IpCheck').trim()
+	const providerName = String(options.providerName || groupName).trim()
+	const domains = ensureUniqueValues(options.domains || [])
+
+	if (!targetGroup) throw new Error('targetGroup is required')
+	if (!username) throw new Error('username is required')
+	if (!password) throw new Error('password is required')
+	if (!groupName) throw new Error('groupName is required')
+	if (!providerName) throw new Error('providerName is required')
+
+	const currentConfig = (await getMihomoConfigs(mihomoUrl, secret)) || {}
+	const authUsers = normalizeAuthUsers(currentConfig.authentication)
+	const existingAuth = authUsers.find((item) => item.username === username) || null
+	const nextPassword = existingAuth?.password || password
+	let changed = false
+
+	if (!existingAuth) {
+		authUsers.push({ username, password: nextPassword })
+		changed = true
+	}
+
+	const currentGroups = Array.isArray(currentConfig['proxy-groups']) ? [...currentConfig['proxy-groups']] : []
+	const groupIdx = currentGroups.findIndex((group) => String(group?.name || '') === groupName)
+	if (groupIdx === -1) {
+		currentGroups.push({
+			name: groupName,
+			type: 'select',
+			'include-all': true,
+			'include-all-proxies': true,
+		})
+		changed = true
+	} else {
+		const group = currentGroups[groupIdx] || {}
+		if (String(group.type || '').toLowerCase() !== 'select') {
+			throw new Error(`本地代理组 ${groupName} 已存在且类型不是 select`)
+		}
+		const nextGroup = {
+			...group,
+			name: groupName,
+			type: 'select',
+			'include-all': true,
+			'include-all-proxies': true,
+		}
+		delete nextGroup.hidden
+		if (JSON.stringify(nextGroup) !== JSON.stringify(group)) {
+			currentGroups[groupIdx] = nextGroup
+			changed = true
+		}
+	}
+
+	const currentProviders = (currentConfig['rule-providers'] && typeof currentConfig['rule-providers'] === 'object')
+		? { ...currentConfig['rule-providers'] }
+		: {}
+	const nextProvider = buildIpCheckRuleProvider(domains)
+	if (JSON.stringify(currentProviders[providerName] || {}) !== JSON.stringify(nextProvider)) {
+		currentProviders[providerName] = nextProvider
+		changed = true
+	}
+
+	const currentRules = normalizeRules(currentConfig.rules)
+	const anchor = findIpCheckRuleAnchor(currentRules)
+	const baseRules = removeManagedIpCheckRules(currentRules, providerName, groupName, username)
+	const canonicalRule = buildIpCheckRule(providerName, groupName, username)
+	const nextRules = insertRuleWithAnchor(baseRules, canonicalRule, anchor)
+	if (JSON.stringify(nextRules) !== JSON.stringify(currentRules)) {
+		changed = true
+	}
+
+	if (changed) {
+		await mihomoFetch(mihomoUrl, secret, '/configs?force=true', {
+			method: 'PUT',
+			body: JSON.stringify({
+				...currentConfig,
+				authentication: serializeAuthUsers(authUsers),
+				'rule-providers': currentProviders,
+				'proxy-groups': currentGroups,
+				rules: nextRules,
+			}),
+		})
+	}
+
+	return {
+		ok: true,
+		changed,
+		authUser: { username, password: nextPassword },
+		groupName,
+		targetGroup,
+	}
+}
+
 export async function getProxyProviders(url, secret) {
 	const data = await mihomoFetch(url, secret, '/providers/proxies')
 	return data.providers || {}
@@ -271,6 +436,19 @@ export async function setProxySelector(url, secret, proxyName, targetName) {
 	})
 
 	return { ok: true }
+}
+
+export async function closeConnection(url, secret, connectionId) {
+	const id = String(connectionId || '').trim()
+	if (!id) {
+		throw new Error('connectionId is required')
+	}
+
+	await mihomoFetch(url, secret, `/connections/${encodeURIComponent(id)}`, {
+		method: 'DELETE',
+	})
+
+	return { ok: true, id }
 }
 
 export async function updateRule(mihomoUrl, secret, oldRule, newRule) {
@@ -376,6 +554,174 @@ export async function updateRuleRemote(subMagicUrl, accessKey, oldRule, newRule,
 
 	const text = await res.text()
 	return text ? JSON.parse(text) : { ok: true }
+}
+
+export async function getRemoteProxyGroups(subMagicUrl, accessKey) {
+	return subMagicFetch(subMagicUrl, accessKey, '/api/config/proxy-groups')
+}
+
+export async function getRemoteRuleProviders(subMagicUrl, accessKey) {
+	return subMagicFetch(subMagicUrl, accessKey, '/api/config/rule-providers')
+}
+
+export async function createRemoteRuleProvider(subMagicUrl, accessKey, provider) {
+	return subMagicFetch(subMagicUrl, accessKey, '/api/config/rule-providers', {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify(provider),
+	})
+}
+
+export async function updateRemoteRuleProvider(subMagicUrl, accessKey, name, provider) {
+	return subMagicFetch(subMagicUrl, accessKey, `/api/config/rule-providers/${encodeURIComponent(name)}`, {
+		method: 'PUT',
+		headers: {
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify(provider),
+	})
+}
+
+export async function createRemoteProxyGroup(subMagicUrl, accessKey, group) {
+	return subMagicFetch(subMagicUrl, accessKey, '/api/config/proxy-groups', {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify(group),
+	})
+}
+
+export async function updateRemoteProxyGroup(subMagicUrl, accessKey, name, group) {
+	return subMagicFetch(subMagicUrl, accessKey, `/api/config/proxy-groups/${encodeURIComponent(name)}`, {
+		method: 'PUT',
+		headers: {
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify(group),
+	})
+}
+
+export async function getRemoteRules(subMagicUrl, accessKey) {
+	return subMagicFetch(subMagicUrl, accessKey, '/api/config/rules')
+}
+
+export async function replaceRemoteRules(subMagicUrl, accessKey, rules) {
+	return subMagicFetch(subMagicUrl, accessKey, '/api/config/rules', {
+		method: 'PUT',
+		headers: {
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({ rules }),
+	})
+}
+
+export async function createProxyAuthUser(subMagicUrl, accessKey, user) {
+	return subMagicFetch(subMagicUrl, accessKey, '/api/config/proxy-auth-users', {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify(user),
+	})
+}
+
+export async function ensureIpCheckRemoteConfig(subMagicUrl, accessKey, options = {}) {
+	const targetGroup = String(options.targetGroup || '').trim()
+	const username = String(options.username || 'IpCheck').trim()
+	const password = String(options.password || '').trim()
+	const groupName = String(options.groupName || 'IpCheck').trim()
+	const providerName = String(options.providerName || groupName).trim()
+	const domains = ensureUniqueValues(options.domains || [])
+
+	if (!targetGroup) throw new Error('targetGroup is required')
+	if (!username) throw new Error('username is required')
+	if (!password) throw new Error('password is required')
+	if (!groupName) throw new Error('groupName is required')
+	if (!providerName) throw new Error('providerName is required')
+
+	let changed = false
+	const remoteUsers = await getProxyAuthUsers(subMagicUrl, accessKey)
+	const users = Array.isArray(remoteUsers) ? remoteUsers : []
+	let authUser = users.find((item) => String(item?.username || '') === username) || null
+	if (!authUser) {
+		await createProxyAuthUser(subMagicUrl, accessKey, { username, password })
+		authUser = { username, password }
+		changed = true
+	}
+
+	const remoteGroups = await getRemoteProxyGroups(subMagicUrl, accessKey)
+	const groups = Array.isArray(remoteGroups) ? remoteGroups : []
+	const existingGroup = groups.find((group) => String(group?.name || '') === groupName) || null
+	if (!existingGroup) {
+		await createRemoteProxyGroup(subMagicUrl, accessKey, {
+			name: groupName,
+			type: 'select',
+			'include-all': true,
+			'include-all-proxies': true,
+		})
+		changed = true
+	} else {
+		if (String(existingGroup.type || '').toLowerCase() !== 'select') {
+			throw new Error(`远程代理组 ${groupName} 已存在且类型不是 select`)
+		}
+		const nextGroup = {
+			...existingGroup,
+			name: groupName,
+			type: 'select',
+			'include-all': true,
+			'include-all-proxies': true,
+		}
+		delete nextGroup.hidden
+		if (JSON.stringify(nextGroup) !== JSON.stringify(existingGroup)) {
+			await updateRemoteProxyGroup(subMagicUrl, accessKey, groupName, {
+				...nextGroup,
+			})
+			changed = true
+		}
+	}
+
+	const remoteProviders = await getRemoteRuleProviders(subMagicUrl, accessKey)
+	const providers = Array.isArray(remoteProviders) ? remoteProviders : []
+	const existingProvider = providers.find((provider) => String(provider?.name || '') === providerName) || null
+	const nextProvider = buildIpCheckRuleProvider(domains)
+	if (!existingProvider) {
+		await createRemoteRuleProvider(subMagicUrl, accessKey, {
+			name: providerName,
+			...nextProvider,
+		})
+		changed = true
+	} else {
+		const currentProviderData = { ...existingProvider }
+		delete currentProviderData.name
+		if (JSON.stringify(currentProviderData) !== JSON.stringify(nextProvider)) {
+			await updateRemoteRuleProvider(subMagicUrl, accessKey, providerName, nextProvider)
+			changed = true
+		}
+	}
+
+	const remoteRules = await getRemoteRules(subMagicUrl, accessKey)
+	const currentRules = Array.isArray(remoteRules)
+		? remoteRules.map((item) => ruleEntryToString(item?.raw || item)).filter(Boolean)
+		: []
+	const anchor = findIpCheckRuleAnchor(currentRules)
+	const baseRules = removeManagedIpCheckRules(currentRules, providerName, groupName, username)
+	const canonicalRule = buildIpCheckRule(providerName, groupName, username)
+	const nextRules = insertRuleWithAnchor(baseRules, canonicalRule, anchor)
+	if (JSON.stringify(nextRules) !== JSON.stringify(currentRules)) {
+		await replaceRemoteRules(subMagicUrl, accessKey, nextRules)
+		changed = true
+	}
+
+	return {
+		ok: true,
+		changed,
+		authUser: { username: authUser.username, password: authUser.password || password },
+		groupName,
+		targetGroup,
+	}
 }
 
 async function subMagicFetch(subMagicUrl, accessKey, path, options = {}) {

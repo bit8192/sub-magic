@@ -10,6 +10,18 @@ export interface ProxyProvider {
   [key: string]: unknown
 }
 
+export interface RuleProvider {
+  type?: string
+  behavior?: string
+  format?: string
+  path?: string
+  url?: string
+  interval?: number
+  proxy?: string
+  payload?: string[]
+  [key: string]: unknown
+}
+
 export interface ProxyGroup {
   name: string
   type: string
@@ -96,6 +108,7 @@ export interface ClashConfig {
   authentication?: string[]
   listeners?: Listener[]
   'proxy-providers'?: Record<string, ProxyProvider>
+  'rule-providers'?: Record<string, RuleProvider>
   'proxy-groups'?: ProxyGroup[]
   rules?: string[]
   proxies?: Record<string, unknown>[]

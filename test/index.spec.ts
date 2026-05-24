@@ -235,6 +235,79 @@ describe("API endpoints", () => {
     expect(rules[0].proxy).toBe("DIRECT")
   })
 
+  it("GET /api/config/proxy-groups accepts access key and returns CORS headers", async () => {
+    const res = await SELF.fetch("http://example.com/api/config/proxy-groups", {
+      headers: {
+        Authorization: "Bearer sm_api_testkey456",
+        Origin: "chrome-extension://test",
+      },
+    })
+    expect(res.status).toBe(200)
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("chrome-extension://test")
+    const groups = await res.json()
+    expect(groups[0].name).toBe("Proxy")
+  })
+
+  it("POST /api/config/rule-providers accepts access key", async () => {
+    const res = await SELF.fetch("http://example.com/api/config/rule-providers", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer sm_api_testkey456",
+        Origin: "chrome-extension://test",
+      },
+      body: JSON.stringify({
+        name: "IpCheck",
+        type: "inline",
+        behavior: "classical",
+        format: "yaml",
+        payload: ["DOMAIN-SUFFIX,ip.sb"],
+      }),
+    })
+    expect(res.status).toBe(200)
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("chrome-extension://test")
+    const stored = await env.SUB_MAGIC.get("config")
+    expect(stored).toContain("rule-providers:")
+    expect(stored).toContain("IpCheck:")
+    expect(stored).toContain("DOMAIN-SUFFIX,ip.sb")
+  })
+
+  it("POST /api/config/proxy-groups accepts access key", async () => {
+    const res = await SELF.fetch("http://example.com/api/config/proxy-groups", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer sm_api_testkey456",
+        Origin: "chrome-extension://test",
+      },
+      body: JSON.stringify({
+        name: "IpCheck",
+        type: "select",
+        proxies: ["Proxy"],
+      }),
+    })
+    expect(res.status).toBe(200)
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("chrome-extension://test")
+    const stored = await env.SUB_MAGIC.get("config")
+    expect(stored).toContain("name: IpCheck")
+  })
+
+  it("POST /api/config/rules accepts access key", async () => {
+    const res = await SELF.fetch("http://example.com/api/config/rules", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer sm_api_testkey456",
+        Origin: "chrome-extension://test",
+      },
+      body: JSON.stringify({ raw: "AND,((IN-USER,IpCheck),(RULE-SET,IpCheck)),IpCheck" }),
+    })
+    expect(res.status).toBe(200)
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("chrome-extension://test")
+    const stored = await env.SUB_MAGIC.get("config")
+    expect(stored).toContain("AND,((IN-USER,IpCheck),(RULE-SET,IpCheck)),IpCheck")
+  })
+
   it("POST /api/config/rules adds a rule", async () => {
     const res = await SELF.fetch("http://example.com/api/config/rules", {
       method: "POST",

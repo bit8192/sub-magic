@@ -494,6 +494,136 @@ body {
 }
 .route-rule-line:hover { color: var(--warning); }
 
+.ipcheck-actions {
+	padding-left: 30px;
+	margin-top: 8px;
+}
+
+.btn-ipcheck {
+	padding: 4px 10px;
+	font-size: 11px;
+}
+
+.ipcheck-result {
+	margin-top: 8px;
+	padding: 8px 10px;
+	border-radius: 6px;
+	background: rgba(0, 212, 255, 0.08);
+	border: 1px solid rgba(0, 212, 255, 0.18);
+	font-size: 11px;
+	line-height: 1.6;
+	color: var(--text);
+	word-break: break-all;
+}
+
+.ipcheck-group + .ipcheck-group {
+	margin-top: 12px;
+	padding-top: 12px;
+	border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ipcheck-group-title {
+	margin-bottom: 8px;
+	font-size: 11px;
+	font-weight: 700;
+	color: var(--primary);
+	text-transform: uppercase;
+	letter-spacing: 0.4px;
+}
+
+.ipcheck-row {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 4px 0;
+}
+
+.ipcheck-row span {
+	color: var(--text-muted);
+	flex: 0 0 88px;
+}
+
+.ipcheck-row strong {
+	flex: 1;
+	text-align: right;
+	font-weight: 600;
+	color: var(--text);
+	word-break: break-all;
+}
+
+.ipcheck-matrix {
+	display: grid;
+	gap: 1px;
+	background: rgba(255, 255, 255, 0.08);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 6px;
+	overflow: hidden;
+}
+
+.ipcheck-matrix-row {
+	display: grid;
+	grid-template-columns: 88px repeat(4, minmax(0, 1fr));
+	gap: 1px;
+	background: rgba(255, 255, 255, 0.08);
+}
+
+.ipcheck-matrix-cell {
+	padding: 8px 6px;
+	background: rgba(0, 0, 0, 0.18);
+	font-size: 10px;
+	line-height: 1.4;
+	color: var(--text);
+	word-break: break-word;
+	text-align: center;
+}
+
+.ipcheck-matrix-cell.label {
+	color: var(--text-muted);
+	font-weight: 600;
+}
+
+.ipcheck-matrix-row.header .ipcheck-matrix-cell {
+	background: rgba(0, 212, 255, 0.12);
+	color: var(--primary);
+	font-weight: 700;
+}
+
+.ipcheck-result.success {
+	border-color: rgba(0, 255, 136, 0.2);
+	background: rgba(0, 255, 136, 0.08);
+}
+
+.ipcheck-result.error {
+	border-color: rgba(255, 51, 102, 0.2);
+	background: rgba(255, 51, 102, 0.08);
+	color: #ff9ab5;
+}
+
+.ipcheck-raw {
+	margin-top: 12px;
+	border-top: 1px solid rgba(255, 255, 255, 0.08);
+	padding-top: 12px;
+}
+
+.ipcheck-raw summary {
+	cursor: pointer;
+	color: var(--primary);
+	font-size: 11px;
+}
+
+.ipcheck-raw pre {
+	margin-top: 8px;
+	padding: 8px;
+	background: rgba(0, 0, 0, 0.22);
+	border-radius: 6px;
+	font-size: 10px;
+	line-height: 1.5;
+	white-space: pre-wrap;
+	word-break: break-all;
+	color: var(--text-muted);
+}
+
 .route-issue-tag {
 	display: inline-flex;
 	align-items: center;

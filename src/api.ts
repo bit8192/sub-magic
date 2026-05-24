@@ -8,7 +8,7 @@ import {
   restoreConfigVersion, deleteConfigVersion,
 } from './config'
 import {
-  parseConfig, serializeConfig, parseRule, type Listener, type ProxyAuthUser, type ProxyGroup, type ProxyProvider,
+  parseConfig, serializeConfig, parseRule, type Listener, type ProxyAuthUser, type ProxyGroup, type ProxyProvider, type RuleProvider,
 } from './yaml'
 import {
   verifyPassword,
@@ -422,9 +422,19 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     return json({ ok: true })
   }
 
-  // All other API routes require auth
-  const authErr = await requireAuth(request, env)
-  if (authErr) return authErr
+  // All other API routes require auth, except selected config endpoints that also allow access keys.
+  const configAccessKeyPath =
+    path === '/api/config/rule-providers' ||
+    path.startsWith('/api/config/rule-providers/') ||
+    path === '/api/config/proxy-groups' ||
+    path.startsWith('/api/config/proxy-groups/') ||
+    path === '/api/config/rules' ||
+    path.startsWith('/api/config/rules/')
+
+  if (!configAccessKeyPath) {
+    const authErr = await requireAuth(request, env)
+    if (authErr) return authErr
+  }
 
   // --- Config full text ---
   if (path === '/api/config' && method === 'GET') {
@@ -501,106 +511,183 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
   }
 
   // --- Proxy Groups ---
+  if (path === '/api/config/rule-providers') {
+    const authErr = await requireAuthOrAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
+    const config = await getParsedConfig(env)
+    const providers = config['rule-providers'] || {}
+
+    if (method === 'GET') {
+      const list = Object.entries(providers).map(([name, provider]) => ({ name, ...provider }))
+      return withCors(json(list), request)
+    }
+
+    if (method === 'POST') {
+      const body = (await parseBody(request)) as unknown as RuleProvider & { name?: string }
+      const name = String(body.name || '').trim()
+      if (!name) return withCors(json({ error: 'Name is required' }, 400), request)
+      if (providers[name]) return withCors(json({ error: 'Rule provider already exists' }, 409), request)
+      const { name: _name, ...providerData } = body
+      config['rule-providers'] = {
+        ...providers,
+        [name]: providerData,
+      }
+      await saveConfig(env, serializeConfig(config))
+      return withCors(json({ ok: true }), request)
+    }
+  }
+
+  if (path.startsWith('/api/config/rule-providers/') && method === 'PUT') {
+    const authErr = await requireAuthOrAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
+    const name = decodeURIComponent(path.slice('/api/config/rule-providers/'.length))
+    const config = await getParsedConfig(env)
+    const providers = config['rule-providers'] || {}
+    if (!providers[name]) return withCors(json({ error: 'Not found' }, 404), request)
+    const body = (await parseBody(request)) as unknown as RuleProvider
+    config['rule-providers'] = {
+      ...providers,
+      [name]: body,
+    }
+    await saveConfig(env, serializeConfig(config))
+    return withCors(json({ ok: true }), request)
+  }
+
+  if (path.startsWith('/api/config/rule-providers/') && method === 'DELETE') {
+    const authErr = await requireAuthOrAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
+    const name = decodeURIComponent(path.slice('/api/config/rule-providers/'.length))
+    const config = await getParsedConfig(env)
+    const providers = config['rule-providers'] || {}
+    if (!providers[name]) return withCors(json({ error: 'Not found' }, 404), request)
+    delete providers[name]
+    config['rule-providers'] = providers
+    await saveConfig(env, serializeConfig(config))
+    return withCors(json({ ok: true }), request)
+  }
+
+  // --- Proxy Groups ---
   if (path === '/api/config/proxy-groups') {
+    const authErr = await requireAuthOrAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
     const config = await getParsedConfig(env)
     const groups = config['proxy-groups'] || []
 
     if (method === 'GET') {
-      return json(groups)
+      return withCors(json(groups), request)
     }
 
     if (method === 'POST') {
       const body = (await parseBody(request)) as unknown as ProxyGroup
       const name = String(body.name || '').trim()
-      if (!name) return json({ error: 'Name is required' }, 400)
-      if (groups.some(g => g.name === name)) return json({ error: 'Group already exists' }, 409)
+      if (!name) return withCors(json({ error: 'Name is required' }, 400), request)
+      if (groups.some(g => g.name === name)) return withCors(json({ error: 'Group already exists' }, 409), request)
       groups.push(body)
       config['proxy-groups'] = groups
       await saveConfig(env, serializeConfig(config))
-      return json({ ok: true })
+      return withCors(json({ ok: true }), request)
     }
   }
 
   if (path.startsWith('/api/config/proxy-groups/') && method === 'PUT') {
+    const authErr = await requireAuthOrAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
     const name = decodeURIComponent(path.slice('/api/config/proxy-groups/'.length))
     const config = await getParsedConfig(env)
     const groups = config['proxy-groups'] || []
     const idx = groups.findIndex(g => g.name === name)
-    if (idx === -1) return json({ error: 'Not found' }, 404)
+    if (idx === -1) return withCors(json({ error: 'Not found' }, 404), request)
     const body = (await parseBody(request)) as unknown as ProxyGroup
     groups[idx] = body
     config['proxy-groups'] = groups
     await saveConfig(env, serializeConfig(config))
-    return json({ ok: true })
+    return withCors(json({ ok: true }), request)
   }
 
   if (path.startsWith('/api/config/proxy-groups/') && method === 'DELETE') {
+    const authErr = await requireAuthOrAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
     const name = decodeURIComponent(path.slice('/api/config/proxy-groups/'.length))
     const config = await getParsedConfig(env)
     const groups = config['proxy-groups'] || []
     const idx = groups.findIndex(g => g.name === name)
-    if (idx === -1) return json({ error: 'Not found' }, 404)
+    if (idx === -1) return withCors(json({ error: 'Not found' }, 404), request)
     groups.splice(idx, 1)
     config['proxy-groups'] = groups
     await saveConfig(env, serializeConfig(config))
-    return json({ ok: true })
+    return withCors(json({ ok: true }), request)
   }
 
   // --- Rules ---
   if (path === '/api/config/rules') {
+    const authErr = await requireAuthOrAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
     const config = await getParsedConfig(env)
     const rules = config.rules || []
 
     if (method === 'GET') {
       const parsed = rules.map((r, i) => ({ index: i, raw: r, ...parseRule(r) }))
-      return json(parsed)
+      return withCors(json(parsed), request)
     }
 
     if (method === 'POST') {
       const body = await parseBody(request)
       const raw = String(body.raw || '')
-      if (!raw) return json({ error: 'Rule is required' }, 400)
+      if (!raw) return withCors(json({ error: 'Rule is required' }, 400), request)
       rules.push(raw)
       config.rules = rules
       await saveConfig(env, serializeConfig(config))
-      return json({ ok: true })
+      return withCors(json({ ok: true }), request)
     }
 
     if (method === 'PUT') {
       const body = await parseBody(request)
       const reorder = body.rules as string[]
-      if (!Array.isArray(reorder)) return json({ error: 'rules array required' }, 400)
+      if (!Array.isArray(reorder)) return withCors(json({ error: 'rules array required' }, 400), request)
       config.rules = reorder
       await saveConfig(env, serializeConfig(config))
-      return json({ ok: true })
+      return withCors(json({ ok: true }), request)
     }
   }
 
   if (path.startsWith('/api/config/rules/') && method === 'PUT') {
+    const authErr = await requireAuthOrAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
     const idxStr = path.slice('/api/config/rules/'.length)
     const idx = parseInt(idxStr, 10)
     const config = await getParsedConfig(env)
     const rules = config.rules || []
-    if (idx < 0 || idx >= rules.length) return json({ error: 'Index out of range' }, 404)
+    if (idx < 0 || idx >= rules.length) return withCors(json({ error: 'Index out of range' }, 404), request)
     const body = await parseBody(request)
     const raw = String(body.raw || '')
-    if (!raw) return json({ error: 'Rule is required' }, 400)
+    if (!raw) return withCors(json({ error: 'Rule is required' }, 400), request)
     rules[idx] = raw
     config.rules = rules
     await saveConfig(env, serializeConfig(config))
-    return json({ ok: true })
+    return withCors(json({ ok: true }), request)
   }
 
   if (path.startsWith('/api/config/rules/') && method === 'DELETE') {
+    const authErr = await requireAuthOrAccessKey(request, env)
+    if (authErr) return withCors(authErr, request)
+
     const idxStr = path.slice('/api/config/rules/'.length)
     const idx = parseInt(idxStr, 10)
     const config = await getParsedConfig(env)
     const rules = config.rules || []
-    if (idx < 0 || idx >= rules.length) return json({ error: 'Index out of range' }, 404)
+    if (idx < 0 || idx >= rules.length) return withCors(json({ error: 'Index out of range' }, 404), request)
     rules.splice(idx, 1)
     config.rules = rules
     await saveConfig(env, serializeConfig(config))
-    return json({ ok: true })
+    return withCors(json({ ok: true }), request)
   }
 
   // --- Config Version History ---
