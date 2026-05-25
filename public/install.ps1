@@ -10,7 +10,7 @@ $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Pri
 if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
 	$scriptPath = $MyInvocation.MyCommand.Path
 	if (-not [string]::IsNullOrWhiteSpace($scriptPath)) {
-		Write-Host '正在请求管理员权限...'
+		Write-Host 'Requesting administrator privileges...'
 		if (-not [System.IO.Path]::IsPathRooted($ConfigPath)) {
 			$ConfigPath = [System.IO.Path]::GetFullPath((Join-Path $PWD.Path $ConfigPath))
 		}
@@ -27,7 +27,7 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 		$proc = Start-Process -FilePath PowerShell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$cmdBody`"" -Verb RunAs -Wait -PassThru
 		exit $proc.ExitCode
 	}
-	throw '此脚本需要管理员权限。请以管理员身份运行 PowerShell 后重试。'
+	throw 'This script requires administrator privileges. Please rerun PowerShell as Administrator.'
 }
 
 $ErrorActionPreference = 'Stop'
@@ -113,10 +113,10 @@ function Escape-PowerShellSingleQuoted {
 function Get-LatestMihomoAsset {
 	param([string]$BaseUrl)
 
-	Write-Step '正在解析 Mihomo 最新 Windows 发布信息'
+	Write-Step 'Resolving latest Mihomo Windows release'
 	$releaseJson = Invoke-RestMethod -Uri "$BaseUrl/api/proxy/github/release?repo=MetaCubeX/mihomo"
 	if (-not $releaseJson.assets) {
-		throw 'GitHub Releases 未返回可下载资产。'
+		throw 'GitHub Releases did not return any downloadable assets.'
 	}
 
 	foreach ($pattern in Get-MihomoAssetPatterns) {
@@ -128,16 +128,16 @@ function Get-LatestMihomoAsset {
 		}
 	}
 
-	throw '未找到匹配当前 Windows 架构的 Mihomo 压缩包。'
+	throw 'No Mihomo archive matches the current Windows architecture.'
 }
 
 function Get-LatestWinSWAsset {
 	param([string]$BaseUrl)
 
-	Write-Step '正在解析 WinSW 最新 Windows 发布信息'
+	Write-Step 'Resolving latest WinSW Windows release'
 	$releaseJson = Invoke-RestMethod -Uri "$BaseUrl/api/proxy/github/release?repo=winsw/winsw"
 	if (-not $releaseJson.assets) {
-		throw 'WinSW GitHub Releases 未返回可下载资产。'
+		throw 'WinSW GitHub Releases did not return any downloadable assets.'
 	}
 
 	foreach ($pattern in Get-WinSWAssetPatterns) {
@@ -149,7 +149,7 @@ function Get-LatestWinSWAsset {
 		}
 	}
 
-	throw '未找到匹配当前 Windows 架构的 WinSW 可执行文件。'
+	throw 'No WinSW executable matches the current Windows architecture.'
 }
 
 function Download-MihomoExe {
@@ -163,22 +163,22 @@ function Download-MihomoExe {
 	$extractDir = Join-Path $env:TEMP ("sub-magic-mihomo-" + [guid]::NewGuid().ToString('N'))
 
 	try {
-		Write-Step "下载 $($asset.name)"
+		Write-Step "Downloading $($asset.name)"
 		Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tempZip
 
-		Write-Step '解压 Mihomo 压缩包'
+		Write-Step 'Extracting Mihomo archive'
 		Expand-Archive -LiteralPath $tempZip -DestinationPath $extractDir -Force
 
 		$exe = Get-ChildItem -LiteralPath $extractDir -Filter 'mihomo*.exe' -File -Recurse |
 			Sort-Object FullName |
 			Select-Object -First 1
 		if (-not $exe) {
-			throw '压缩包中未找到 Mihomo 可执行文件。'
+			throw 'The Mihomo executable was not found in the archive.'
 		}
 
 		$targetExe = Join-Path $TargetDirectory 'mihomo.exe'
 		Copy-Item -LiteralPath $exe.FullName -Destination $targetExe -Force
-		Write-Step "已解压可执行文件到 $targetExe"
+		Write-Step "Extracted executable to $targetExe"
 		return $targetExe
 	} finally {
 		if (Test-Path -LiteralPath $tempZip) {
@@ -199,9 +199,9 @@ function Download-WinSWExe {
 	$asset = Get-LatestWinSWAsset -BaseUrl $BaseUrl
 	$targetExe = Join-Path $TargetDirectory 'mihomo-service.exe'
 
-	Write-Step "下载 WinSW $($asset.name)"
+	Write-Step "Downloading WinSW $($asset.name)"
 	Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $targetExe
-	Write-Step "WinSW 已保存到 $targetExe"
+	Write-Step "Saved WinSW to $targetExe"
 	return $targetExe
 }
 
@@ -223,7 +223,7 @@ function Install-MihomoService {
 
 	$existing = Get-MihomoService
 	if ($existing) {
-		Write-Step "发现已存在的服务: $($existing.Name)，正在移除..."
+		Write-Step "Found existing service: $($existing.Name). Removing it..."
 		Stop-Service -Name $existing.Name -Force -ErrorAction SilentlyContinue
 		if ($existing.PathName -match 'mihomo-service\.exe') {
 			$oldExe = $existing.PathName.Trim('"')
@@ -233,12 +233,12 @@ function Install-MihomoService {
 		}
 		sc.exe delete $existing.Name
 		if ($LASTEXITCODE -ne 0) {
-			Write-Warning "sc.exe delete 返回 $LASTEXITCODE，继续..."
+			Write-Warning "sc.exe delete returned $LASTEXITCODE. Continuing..."
 		}
 		Start-Sleep -Seconds 2
 	}
 
-	Write-Step "生成 WinSW 配置 $winswXml"
+	Write-Step "Writing WinSW config to $winswXml"
 	$xml = @"
 <service>
   <id>mihomo</id>
@@ -256,16 +256,16 @@ function Install-MihomoService {
 "@
 	[System.IO.File]::WriteAllText($winswXml, $xml, [System.Text.UTF8Encoding]::new($false))
 
-	Write-Step "注册服务 $serviceName"
+	Write-Step "Installing service $serviceName"
 	& $winswExe install
 	if ($LASTEXITCODE -ne 0) {
-		throw "WinSW install 失败，退出码: $LASTEXITCODE"
+		throw "WinSW install failed with exit code $LASTEXITCODE"
 	}
 
-	Write-Step "启动服务 $serviceName"
+	Write-Step "Starting service $serviceName"
 	& $winswExe start
 	if ($LASTEXITCODE -ne 0) {
-		throw "WinSW start 失败，退出码: $LASTEXITCODE"
+		throw "WinSW start failed with exit code $LASTEXITCODE"
 	}
 }
 
@@ -277,10 +277,10 @@ function Install-UpdateScript {
 		[string]$SubscriptionUrl
 	)
 
-	Write-Step "下载自动更新脚本到 $TargetScriptPath"
+	Write-Step "Downloading update script to $TargetScriptPath"
 	$rawContent = (New-Object System.Net.WebClient).DownloadString("$BaseUrl/sub-magic.ps1")
 	$content = $rawContent.Replace('__CONFIG_PATH__', (Escape-PowerShellSingleQuoted $ConfigFilePath)).Replace('__SUB_URL__', (Escape-PowerShellSingleQuoted $SubscriptionUrl))
-	[System.IO.File]::WriteAllText($TargetScriptPath, $content, [System.Text.UTF8Encoding]::new($false))
+	[System.IO.File]::WriteAllText($TargetScriptPath, $content, [System.Text.UTF8Encoding]::new($true))
 }
 
 function Register-UpdateTask {
@@ -329,10 +329,10 @@ function Register-UpdateTask {
 		[System.IO.File]::WriteAllText($xmlPath, $xml, [System.Text.Encoding]::Unicode)
 		$env:_SCHTN = $ScheduledTaskName
 		$env:_SCHTXML = $xmlPath
-		Write-Step "注册计划任务 $ScheduledTaskName"
+		Write-Step "Registering scheduled task $ScheduledTaskName"
 		cmd.exe /c --% schtasks /create /tn "%_SCHTN%" /xml "%_SCHTXML%" /f
 		if ($LASTEXITCODE -ne 0) {
-			throw "schtasks /create /xml 失败，退出码: $LASTEXITCODE"
+			throw "schtasks /create /xml failed with exit code $LASTEXITCODE"
 		}
 	} finally {
 		Remove-Item env:_SCHTN, env:_SCHTXML -ErrorAction SilentlyContinue
@@ -361,25 +361,25 @@ $mihomoService = Get-MihomoService
 $mihomoExePath = $null
 
 if ($mihomoService) {
-	Write-Step "检测到 Mihomo 服务: $($mihomoService.Name)"
+	Write-Step "Detected Mihomo service: $($mihomoService.Name)"
 } else {
-	Write-Step '未检测到 Mihomo 服务'
+	Write-Step 'No Mihomo service detected'
 	$mihomoExePath = Get-LocalMihomoExe -Directory $workDir
 
 	if (-not $mihomoExePath) {
-		if (Confirm-Action -Message '当前目录未找到 Mihomo 可执行程序，是否尝试通过 Cloudflare Worker 代理下载？') {
+		if (Confirm-Action -Message 'No Mihomo executable was found in the current directory. Download it through the Cloudflare Worker proxy?') {
 			$mihomoExePath = Download-MihomoExe -TargetDirectory $workDir -BaseUrl $baseUrl
 		} else {
-			Write-Warning '已跳过 Mihomo 下载。'
+			Write-Warning 'Skipped Mihomo download.'
 		}
 	} else {
-		Write-Step "当前目录找到 Mihomo 可执行程序: $mihomoExePath"
+		Write-Step "Found Mihomo executable in current directory: $mihomoExePath"
 	}
 
-	if ($mihomoExePath -and (Confirm-Action -Message '是否现在安装 Mihomo 服务？')) {
+	if ($mihomoExePath -and (Confirm-Action -Message 'Install the Mihomo service now?')) {
 		$winswExe = Join-Path $workDir 'mihomo-service.exe'
 		if (-not (Test-Path -LiteralPath $winswExe)) {
-			Write-Step '正在下载 WinSW 服务包装器'
+			Write-Step 'Downloading WinSW service wrapper'
 			$null = Download-WinSWExe -TargetDirectory $workDir -BaseUrl $baseUrl
 		}
 		Install-MihomoService -ExePath $mihomoExePath -ConfigFilePath $ConfigPath
@@ -391,10 +391,10 @@ Register-UpdateTask -ScheduledTaskName $TaskName -ScriptPath $updateScriptPath
 
 Write-Host "Installed: task=$TaskName, config=$ConfigPath"
 } catch {
-	Write-Host "安装失败: $_" -ForegroundColor Red
+	Write-Host "Installation failed: $_" -ForegroundColor Red
 } finally {
 	if ($host.UI.RawUI) {
-		Write-Host "`n按任意键退出..."
+		Write-Host "`nPress any key to exit..."
 		$null = $host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
 	}
 }

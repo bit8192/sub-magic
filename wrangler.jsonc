@@ -24,8 +24,8 @@
 	 *
 	 * 如需本地开发调试，可参考下方取消注释：
 	 */
-	// "kv_namespaces": [
-	//   { "binding": "SUB_MAGIC", "id": "" }
-	// ],
+	 "kv_namespaces": [
+	   { "binding": "SUB_MAGIC", "id": "test" }
+	 ],
 	"upload_source_maps": true
 }
