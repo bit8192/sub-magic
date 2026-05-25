@@ -18,10 +18,14 @@ export const RULE_TYPES = [
 
 const COMMON_RULE_TARGETS = ['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'GLOBAL']
 const PROXY_RULE_TYPES = ['http', 'https', 'socks4', 'socks5']
+const LOGICAL_RULE_TYPES = ['AND', 'OR', 'NOT']
+const LOGICAL_OPERAND_TYPES = RULE_TYPES.filter(type => type !== 'MATCH' && !LOGICAL_RULE_TYPES.includes(type))
 
 let activeRuleFormIndex
 let pendingRuleDraft = null
 let ruleOptionMeta = { users: [], listeners: [] }
+let ruleTargetOptions = []
+let logicalPickerTargetIndex = null
 
 async function ensureRuleOptionMeta() {
   const [users, listeners] = await Promise.all([
@@ -116,6 +120,7 @@ async function saveRuleOrder() {
 
 export async function showRuleForm(index, draft = null) {
   activeRuleFormIndex = index
+  logicalPickerTargetIndex = null
 
   let state = draft
   if (!state) {
@@ -132,7 +137,7 @@ export async function showRuleForm(index, draft = null) {
     ensureRuleOptionMeta(),
   ])
   const typeOptions = buildRuleTypeOptions(state.type)
-  const targetOptions = [...new Set([...COMMON_RULE_TARGETS, ...allGroups.map(g => g.name), state.target].filter(Boolean))]
+  ruleTargetOptions = [...new Set([...COMMON_RULE_TARGETS, ...allGroups.map(g => g.name), state.target].filter(Boolean))]
 
   showModal(`
     <h3>${index !== undefined && index >= 0 ? '编辑' : '添加'}规则</h3>
@@ -145,10 +150,7 @@ export async function showRuleForm(index, draft = null) {
       </div>
       <div class="form-group">
         <label id="rf-target-label">目标策略 / 代理组</label>
-        <input id="rf-target" list="rf-target-options" value="${esc(state.target || '')}" placeholder="如 Proxy、DIRECT、REJECT、sub-rule" />
-        <datalist id="rf-target-options">
-          ${targetOptions.map(o => `<option value="${esc(o)}"></option>`).join('')}
-        </datalist>
+        <div id="rf-target-control"></div>
       </div>
     </div>
 
@@ -178,11 +180,19 @@ export async function showRuleForm(index, draft = null) {
 
     <div class="form-actions">
       <button class="btn-primary" onclick="saveRule(${index !== undefined && index >= 0 ? index : 'undefined'})">保存</button>
-      <button onclick="closeModal()">取消</button>
+      <button onclick="cancelRuleForm()">取消</button>
     </div>
   `)
 
-  ;['rf-type', 'rf-target', 'rf-noresolve', 'rf-src', 'rf-extra-params'].forEach(id => {
+  const payloadGroup = document.getElementById('rf-payload-group')
+  if (payloadGroup) payloadGroup.dataset.initialPayload = state.payload || ''
+  if (payloadGroup && Array.isArray(state.logicalClauses) && state.logicalClauses.length) {
+    payloadGroup.dataset.logicalDraft = JSON.stringify(state.logicalClauses)
+  }
+  const targetGroup = document.getElementById('rf-target-control')
+  if (targetGroup) targetGroup.dataset.initialTarget = state.target || ''
+
+  ;['rf-type', 'rf-noresolve', 'rf-src', 'rf-extra-params'].forEach(id => {
     document.getElementById(id)?.addEventListener(id === 'rf-type' ? 'change' : 'input', updateRuleFormUI)
     if (id === 'rf-noresolve' || id === 'rf-src') document.getElementById(id)?.addEventListener('change', updateRuleFormUI)
   })
@@ -252,6 +262,8 @@ function splitRule(raw) {
 }
 
 function getPayloadControlValue() {
+  const logicalRows = document.querySelectorAll('.logic-clause-row')
+  if (logicalRows.length) return buildLogicalPayloadFromEditor()
   const select = document.getElementById('rf-payload-select')
   if (select) return select.value.trim()
   const input = document.getElementById('rf-payload-input')
@@ -259,9 +271,52 @@ function getPayloadControlValue() {
   return document.getElementById('rf-payload')?.value?.trim() || ''
 }
 
+function getTargetControlValue() {
+  const select = document.getElementById('rf-target-select')
+  if (select) return select.value.trim()
+  return document.getElementById('rf-target-input')?.value?.trim() || ''
+}
+
+function renderTargetControl(type, value) {
+  const container = document.getElementById('rf-target-control')
+  if (!container) return
+
+  if (type === 'SUB-RULE') {
+    container.innerHTML = `<input id="rf-target-input" value="${esc(value || '')}" placeholder="输入子规则名称" />`
+    container.querySelector('#rf-target-input')?.addEventListener('input', updateRuleFormUI)
+    return
+  }
+
+  const options = ['<option value=""></option>']
+    .concat(ruleTargetOptions.map(option => `<option value="${esc(option)}"${option === value ? ' selected' : ''}>${esc(option)}</option>`))
+  container.innerHTML = `<select id="rf-target-select">${options.join('')}</select>`
+  container.querySelector('#rf-target-select')?.addEventListener('change', updateRuleFormUI)
+}
+
 function renderPayloadControl(type, value) {
   const container = document.getElementById('rf-payload-control')
   if (!container) return
+
+  if (LOGICAL_RULE_TYPES.includes(type)) {
+    const payloadGroup = document.getElementById('rf-payload-group')
+    const clauses = readLogicalDraft(payloadGroup, value)
+    container.innerHTML = `
+      <div class="logic-builder">
+        <div class="logic-builder-tip">
+          每行一个子条件，按顺序组合为当前逻辑规则。
+        </div>
+        <div class="logic-clause-list">
+          ${clauses.map((clause, index) => renderLogicalClauseRow(clause, index, type)).join('')}
+        </div>
+        <div class="logic-builder-actions">
+          <button type="button" class="btn-sm btn-primary" onclick="addLogicalClause()">+ 添加条件</button>
+        </div>
+      </div>
+    `
+    container.querySelectorAll('.logic-clause-type').forEach(el => el.addEventListener('change', handleLogicalClauseTypeChange))
+    container.querySelectorAll('.logic-clause-value').forEach(el => el.addEventListener('input', handleLogicalClauseValueInput))
+    return
+  }
 
   if (type === 'IN-USER') {
     const options = ['<option value=""></option>']
@@ -304,10 +359,198 @@ function renderPayloadControl(type, value) {
   container.querySelector('#rf-payload')?.addEventListener('input', updateRuleFormUI)
 }
 
+function renderLogicalClauseRow(clause, index, parentType) {
+  const normalizedType = LOGICAL_OPERAND_TYPES.includes(clause.type) ? clause.type : 'DOMAIN'
+  const normalizedValue = LOGICAL_OPERAND_TYPES.includes(clause.type) ? clause.value : ''
+  const typeOptions = LOGICAL_OPERAND_TYPES.map(option =>
+    `<option value="${option}"${option === normalizedType ? ' selected' : ''}>${option}</option>`
+  ).join('')
+  const removeDisabled = parentType === 'NOT'
+  const pickerButton = normalizedType === 'GEOSITE'
+    ? `<button type="button" class="btn-sm btn-warning" onclick="openLogicalGeositePicker(${index})">GeoSite</button>`
+    : normalizedType === 'GEOIP'
+      ? `<button type="button" class="btn-sm btn-warning" onclick="openLogicalGeoipPicker(${index})">GeoIP</button>`
+      : ''
+  return `
+    <div class="logic-clause-row">
+      <div class="logic-clause-main">
+        <select class="logic-clause-type" data-index="${index}">
+          ${typeOptions}
+        </select>
+        <input
+          class="logic-clause-value"
+          data-index="${index}"
+          value="${esc(normalizedValue || '')}"
+          placeholder="${esc(getLogicalClausePlaceholder(normalizedType))}"
+        />
+        <button
+          type="button"
+          class="btn-sm btn-danger"
+          onclick="removeLogicalClause(${index})"
+          ${removeDisabled ? 'disabled' : ''}
+        >删除</button>
+      </div>
+      ${pickerButton ? `<div class="logic-clause-picker-row">${pickerButton}</div>` : ''}
+      <div class="form-help logic-clause-help">${esc(getLogicalClauseHint(normalizedType))}</div>
+    </div>
+  `
+}
+
+function getLogicalClausePlaceholder(type) {
+  switch (type) {
+    case 'DOMAIN':
+    case 'DOMAIN-SUFFIX':
+      return '例如 google.com'
+    case 'DOMAIN-KEYWORD':
+      return '例如 google'
+    case 'DOMAIN-WILDCARD':
+      return '例如 *.google.com'
+    case 'DOMAIN-REGEX':
+      return '例如 ^abc.*com'
+    case 'GEOSITE':
+      return '例如 youtube'
+    case 'GEOIP':
+    case 'SRC-GEOIP':
+      return '例如 CN'
+    case 'IP-CIDR':
+    case 'SRC-IP-CIDR':
+      return '例如 192.168.1.0/24'
+    case 'NETWORK':
+      return '例如 UDP'
+    case 'DST-PORT':
+    case 'SRC-PORT':
+    case 'IN-PORT':
+      return '例如 443'
+    default:
+      return '输入该条件的 payload'
+  }
+}
+
+function getLogicalClauseHint(type) {
+  return `将生成 (${type},payload) 形式的子条件。`
+}
+
+function stripOuterParens(raw) {
+  const value = String(raw || '').trim()
+  if (!value.startsWith('(') || !value.endsWith(')')) return value
+  let depth = 0
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i]
+    if (ch === '(') depth += 1
+    else if (ch === ')') depth -= 1
+    if (depth === 0 && i < value.length - 1) return value
+  }
+  return value.slice(1, -1).trim()
+}
+
+function parseLogicalClause(rawClause) {
+  const clause = stripOuterParens(rawClause)
+  const parts = splitRule(clause)
+  const type = parts[0] || 'DOMAIN'
+  if (!LOGICAL_OPERAND_TYPES.includes(type)) {
+    return { type: 'DOMAIN', value: '' }
+  }
+  return {
+    type,
+    value: parts.slice(1).join(',').trim(),
+  }
+}
+
+function defaultLogicalClause() {
+  return { type: 'DOMAIN', value: '' }
+}
+
+function parseLogicalPayload(payload) {
+  const normalized = String(payload || '').trim()
+  if (!normalized) return [defaultLogicalClause()]
+  const inner = stripOuterParens(normalized)
+  const clauses = splitRule(inner).map(parseLogicalClause).filter(clause => clause.type || clause.value)
+  return clauses.length ? clauses : [defaultLogicalClause()]
+}
+
+function serializeLogicalClause(clause) {
+  const type = String(clause?.type || '').trim()
+  const value = String(clause?.value || '').trim()
+  if (!type && !value) return ''
+  if (!value) return ''
+  return `(${type},${value})`
+}
+
+function serializeLogicalClauses(clauses) {
+  const parts = clauses.map(serializeLogicalClause).filter(Boolean)
+  return parts.length ? `(${parts.join(',')})` : ''
+}
+
+function readLogicalClausesFromEditor() {
+  const rows = document.querySelectorAll('.logic-clause-row')
+  return Array.from(rows).map(row => ({
+    type: row.querySelector('.logic-clause-type')?.value || 'DOMAIN',
+    value: row.querySelector('.logic-clause-value')?.value || '',
+  }))
+}
+
+function buildLogicalPayloadFromEditor() {
+  return serializeLogicalClauses(readLogicalClausesFromEditor())
+}
+
+function saveLogicalDraft(clauses) {
+  const payloadGroup = document.getElementById('rf-payload-group')
+  if (payloadGroup) payloadGroup.dataset.logicalDraft = JSON.stringify(clauses)
+}
+
+function clearLogicalDraft() {
+  const payloadGroup = document.getElementById('rf-payload-group')
+  if (payloadGroup) delete payloadGroup.dataset.logicalDraft
+}
+
+function readLogicalDraft(payloadGroup, fallbackPayload = '') {
+  const draft = payloadGroup?.dataset.logicalDraft
+  if (draft) {
+    try {
+      const parsed = JSON.parse(draft)
+      if (Array.isArray(parsed) && parsed.length) return parsed
+    } catch {
+      /* ignore invalid draft */
+    }
+  }
+  return parseLogicalPayload(fallbackPayload)
+}
+
+function applyLogicalPayloadAndRefresh(clauses) {
+  const payload = serializeLogicalClauses(clauses)
+  const payloadGroup = document.getElementById('rf-payload-group')
+  const payloadControl = document.getElementById('rf-payload-control')
+  if (payloadGroup) payloadGroup.dataset.initialPayload = payload
+  saveLogicalDraft(clauses)
+  if (payloadControl) payloadControl.innerHTML = ''
+  updateRuleFormUI()
+}
+
+function syncRulePreviewOnly() {
+  const payloadGroup = document.getElementById('rf-payload-group')
+  const targetGroup = document.getElementById('rf-target-control')
+  if (payloadGroup && document.querySelectorAll('.logic-clause-row').length) {
+    saveLogicalDraft(readLogicalClausesFromEditor())
+  }
+  if (payloadGroup) payloadGroup.dataset.initialPayload = getPayloadControlValue()
+  if (targetGroup) targetGroup.dataset.initialTarget = getTargetControlValue()
+  const preview = document.getElementById('rf-preview')
+  if (preview) preview.value = buildRulePreview()
+}
+
+function handleLogicalClauseTypeChange() {
+  syncRulePreviewOnly()
+  updateRuleFormUI()
+}
+
+function handleLogicalClauseValueInput() {
+  syncRulePreviewOnly()
+}
+
 function buildRulePreview() {
   const type = document.getElementById('rf-type')?.value || ''
   const payload = getPayloadControlValue()
-  const target = document.getElementById('rf-target')?.value?.trim() || ''
+  const target = getTargetControlValue()
   const extras = new Set(
     (document.getElementById('rf-extra-params')?.value || '')
       .split(',')
@@ -336,7 +579,7 @@ function getRuleTypeHint(type) {
     case 'AND':
     case 'OR':
     case 'NOT':
-      return 'payload 需写逻辑表达式，例如 ((DOMAIN,baidu.com),(NETWORK,UDP))。'
+      return '使用下方条件编辑器组合子条件。'
     case 'SUB-RULE':
       return 'payload 例如 (NETWORK,tcp)，目标填 sub-rule 名称。'
     case 'GEOSITE':
@@ -361,8 +604,10 @@ function getRuleTypeHint(type) {
 export function updateRuleFormUI() {
   const type = document.getElementById('rf-type')?.value || ''
   const payloadGroup = document.getElementById('rf-payload-group')
+  const targetGroup = document.getElementById('rf-target-control')
   const payloadHelp = document.getElementById('rf-payload-help')
-  const currentPayload = getPayloadControlValue()
+  const currentPayload = getPayloadControlValue() || payloadGroup?.dataset.initialPayload || ''
+  const currentTarget = getTargetControlValue() || targetGroup?.dataset.initialTarget || ''
   const targetLabel = document.getElementById('rf-target-label')
   const geositeBtn = document.getElementById('geosite-btn')
   const geoipBtn = document.getElementById('geoip-btn')
@@ -370,9 +615,13 @@ export function updateRuleFormUI() {
   const srcLine = document.getElementById('rf-src-line')
 
   const payloadOptional = type.toUpperCase() === 'MATCH'
+  if (!LOGICAL_RULE_TYPES.includes(type)) clearLogicalDraft()
   payloadGroup.style.display = ''
   payloadHelp.textContent = getRuleTypeHint(type)
   renderPayloadControl(type, currentPayload)
+  if (payloadGroup) payloadGroup.dataset.initialPayload = currentPayload
+  renderTargetControl(type, currentTarget)
+  if (targetGroup) targetGroup.dataset.initialTarget = currentTarget
   const payload = document.getElementById('rf-payload') || document.getElementById('rf-payload-input') || document.getElementById('rf-payload-select')
   if (payload && type.toUpperCase() === 'MATCH' && 'placeholder' in payload) payload.placeholder = 'MATCH 可留空'
   targetLabel.textContent = type === 'SUB-RULE' ? '子规则名称' : '目标策略 / 代理组'
@@ -394,12 +643,73 @@ export function updateRuleFormUI() {
 export function togglePickerBtns() { updateRuleFormUI() }
 export function toggleGeoSiteBtn() { updateRuleFormUI() }
 
+export function addLogicalClause() {
+  const type = document.getElementById('rf-type')?.value || 'AND'
+  const clauses = readLogicalClausesFromEditor()
+  if (type === 'NOT' && clauses.length >= 1) {
+    toast('NOT 规则只支持一个子条件', 'warning')
+    return
+  }
+  clauses.push(defaultLogicalClause())
+  applyLogicalPayloadAndRefresh(clauses)
+}
+
+export function removeLogicalClause(index) {
+  const type = document.getElementById('rf-type')?.value || 'AND'
+  let clauses = readLogicalClausesFromEditor().filter((_, i) => i !== index)
+  if (!clauses.length) clauses = [defaultLogicalClause()]
+  if (type === 'NOT' && clauses.length > 1) clauses = [clauses[0]]
+  applyLogicalPayloadAndRefresh(clauses)
+}
+
+function updateLogicalClauseValue(index, nextType, nextValue, sourceClauses = null) {
+  const clauses = Array.isArray(sourceClauses) ? sourceClauses.map(clause => ({ ...clause })) : readLogicalClausesFromEditor()
+  if (!clauses[index]) return
+  clauses[index] = {
+    ...clauses[index],
+    type: nextType ?? clauses[index].type,
+    value: nextValue ?? clauses[index].value,
+  }
+  if (sourceClauses) {
+    const payload = serializeLogicalClauses(clauses)
+    const draft = pendingRuleDraft || defaultRuleState()
+    draft.payload = payload
+    draft.logicalClauses = clauses
+    pendingRuleDraft = draft
+    return
+  }
+  applyLogicalPayloadAndRefresh(clauses)
+}
+
+export function openLogicalGeositePicker(index) {
+  logicalPickerTargetIndex = index
+  openGeositePicker()
+}
+
+export function openLogicalGeoipPicker(index) {
+  logicalPickerTargetIndex = index
+  openGeoipPicker()
+}
+
+export function cancelRuleForm() {
+  closeModal()
+  pendingRuleDraft = null
+  logicalPickerTargetIndex = null
+  if (document.getElementById('gs-list') || document.getElementById('gi-list')) {
+    window.switchView('rules')
+  }
+}
+
 function captureRuleDraft() {
+  const logicalClauses = document.querySelectorAll('.logic-clause-row').length
+    ? readLogicalClausesFromEditor()
+    : undefined
   return {
     index: activeRuleFormIndex,
     type: document.getElementById('rf-type')?.value || 'GEOSITE',
     payload: getPayloadControlValue(),
-    target: document.getElementById('rf-target')?.value || '',
+    logicalClauses,
+    target: getTargetControlValue(),
     params: (document.getElementById('rf-extra-params')?.value || '').split(',').map(v => v.trim()).filter(Boolean),
     noResolve: !!document.getElementById('rf-noresolve')?.checked,
     src: !!document.getElementById('rf-src')?.checked,
@@ -468,6 +778,16 @@ export function toggleGeositeCategory(el) {
 }
 
 export async function selectGeosite(category) {
+  if (logicalPickerTargetIndex !== null) {
+    const draft = pendingRuleDraft || defaultRuleState()
+    const clauses = Array.isArray(draft.logicalClauses) && draft.logicalClauses.length
+      ? draft.logicalClauses
+      : parseLogicalPayload(draft.payload)
+    updateLogicalClauseValue(logicalPickerTargetIndex, 'GEOSITE', category, clauses)
+    logicalPickerTargetIndex = null
+    await showRuleFormFromDraft()
+    return
+  }
   const draft = pendingRuleDraft || defaultRuleState()
   draft.type = 'GEOSITE'
   draft.payload = category
@@ -523,6 +843,16 @@ export function filterGeoip() {
 }
 
 export async function selectGeoip(country) {
+  if (logicalPickerTargetIndex !== null) {
+    const draft = pendingRuleDraft || defaultRuleState()
+    const clauses = Array.isArray(draft.logicalClauses) && draft.logicalClauses.length
+      ? draft.logicalClauses
+      : parseLogicalPayload(draft.payload)
+    updateLogicalClauseValue(logicalPickerTargetIndex, 'GEOIP', country, clauses)
+    logicalPickerTargetIndex = null
+    await showRuleFormFromDraft()
+    return
+  }
   const draft = pendingRuleDraft || defaultRuleState()
   draft.type = 'GEOIP'
   draft.payload = country
@@ -541,11 +871,15 @@ export async function showRuleFormFromDraft() {
 export async function saveRule(index) {
   const raw = buildRulePreview()
   const type = document.getElementById('rf-type').value.trim()
-  const target = document.getElementById('rf-target').value.trim()
+  const target = getTargetControlValue()
   const payload = getPayloadControlValue()
   if (!type) { toast('规则类型不能为空', 'error'); return }
   if (!target) { toast('目标策略不能为空', 'error'); return }
   if (type.toUpperCase() !== 'MATCH' && !payload) { toast('payload 不能为空', 'error'); return }
+  if (type === 'NOT' && parseLogicalPayload(payload).filter(clause => serializeLogicalClause(clause)).length !== 1) {
+    toast('NOT 规则必须且只能有一个有效子条件', 'error')
+    return
+  }
   try {
     if (index !== undefined && index >= 0) {
       await API.put(`/api/config/rules/${index}`, { raw })

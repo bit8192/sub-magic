@@ -32,6 +32,7 @@ export function renderApp() {
         <button data-view="rules" onclick="switchView('rules')">规则</button>
         <button data-view="editor" onclick="switchView('editor')">文本编辑</button>
         <button data-view="versions" onclick="switchView('versions')">历史版本</button>
+        <a href="https://github.com/bit8192/sub-magic" target="_blank" rel="noreferrer" class="nav-link">GitHub</a>
       </nav>
       <button class="btn-logout" onclick="doLogout()">登出</button>
     </div>

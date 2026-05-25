@@ -198,6 +198,17 @@ input:focus, select:focus, textarea:focus {
   background: rgba(0, 212, 255, 0.08);
   box-shadow: 0 0 8px rgba(0, 212, 255, 0.05);
 }
+.topbar nav .nav-link {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all var(--transition);
+}
+.topbar nav .nav-link:hover { color: var(--text); background: var(--surface-2); }
 .btn-logout {
   background: transparent;
   color: var(--text-muted);
@@ -291,6 +302,45 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   gap: 8px;
   margin-top: 10px;
+}
+.logic-builder {
+  display: grid;
+  gap: 10px;
+}
+.logic-builder-tip {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.logic-clause-list {
+  display: grid;
+  gap: 10px;
+}
+.logic-clause-row {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(13, 17, 23, 0.35);
+}
+.logic-clause-main {
+  display: grid;
+  grid-template-columns: minmax(140px, 180px) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+.logic-clause-help {
+  margin-bottom: 0;
+  font-size: 12px;
+}
+.logic-clause-picker-row {
+  display: flex;
+  gap: 8px;
+}
+.logic-builder-actions {
+  display: flex;
+  justify-content: flex-start;
 }
 .form-actions { display: flex; gap: 10px; margin-top: 20px; justify-content: flex-end; }
 
@@ -761,6 +811,7 @@ input[type="checkbox"]:checked::after {
   #app { padding: 12px; }
   .form-row,
   .form-grid { grid-template-columns: 1fr; }
+  .logic-clause-main { grid-template-columns: 1fr; }
   .modal { min-width: auto; width: 92%; padding: 20px; }
   .modal-overlay { padding: 12px; }
   .topbar {

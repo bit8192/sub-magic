@@ -298,6 +298,49 @@ body {
 	width: auto;
 }
 
+.logic-builder {
+	display: grid;
+	gap: 8px;
+}
+
+.logic-builder-tip {
+	font-size: 11px;
+	color: var(--text-muted);
+	line-height: 1.5;
+}
+
+.logic-clause-list {
+	display: grid;
+	gap: 8px;
+}
+
+.logic-clause-row {
+	display: grid;
+	gap: 6px;
+	padding: 8px;
+	border-radius: 6px;
+	background: var(--surface-2);
+	border: 1px solid var(--border);
+}
+
+.logic-clause-main {
+	display: grid;
+	grid-template-columns: minmax(110px, 130px) minmax(0, 1fr) auto;
+	gap: 6px;
+	align-items: center;
+}
+
+.logic-clause-help {
+	font-size: 10px;
+	color: var(--text-muted);
+	line-height: 1.4;
+}
+
+.logic-builder-actions {
+	display: flex;
+	justify-content: flex-start;
+}
+
 .form-actions {
 	display: flex;
 	gap: 6px;

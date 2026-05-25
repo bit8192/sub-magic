@@ -1,8 +1,8 @@
 {
 	"name": "sub-magic-extension",
-	"version": "1.0.2",
+	"version": "1.0.3",
 	"private": true,
-	"description": "Browser extension for Sub Magic - Mihomo rule management",
+	"description": "Sub Magic browser extension for routing inspection, proxy control, IpCheck, and Mihomo rule management",
 	"scripts": {
 		"sync-icon": "node ../scripts/sync-icons.js",
 		"build": "node scripts/build.js",

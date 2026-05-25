@@ -58,9 +58,25 @@ const state = {
 	geoSuggestionSeq: 0,
 	ipCheckByGroupKey: {},
 	ipCheckKnownDomains: [],
+	logicalRuleDraft: null,
 }
 
 const IPCHECK_GROUP_NAME = 'IpCheck'
+const LOGICAL_RULE_TYPES = ['AND', 'OR', 'NOT']
+const LOGICAL_OPERAND_TYPES = [
+	'DOMAIN-SUFFIX',
+	'DOMAIN',
+	'DOMAIN-KEYWORD',
+	'GEOSITE',
+	'GEOIP',
+	'IP-CIDR',
+	'SRC-IP-CIDR',
+	'IN-PORT',
+	'IN-TYPE',
+	'IN-USER',
+	'IN-NAME',
+	'RULE-SET',
+]
 const IPCHECK_USERNAME = 'IpCheck'
 const IPCHECK_DEFAULT_PASSWORD = 'submagic-ipcheck'
 const IPCHECK_RULE_DOMAINS = [
@@ -1670,6 +1686,7 @@ async function showAddPanel(domain, destinationIps = []) {
 	document.getElementById('btn-group-edit').style.display = 'none'
 	state.ruleMode = 'add'
 	state.editingRule = null
+	state.logicalRuleDraft = null
 	state.ruleGeoContext = {
 		host: normalizeRuleHost(domain || state.domain || ''),
 		destinationIps: normalizeDestinationIps(destinationIps),
@@ -1698,6 +1715,7 @@ async function showEditPanel(ruleStr) {
 	document.getElementById('btn-group-edit').style.display = ''
 	state.ruleMode = 'edit'
 	state.editingRule = ruleStr
+	state.logicalRuleDraft = null
 	const info = parseRuleDisplay(ruleStr)
 	state.ruleGeoContext = {
 		host: normalizeRuleHost(info.payload || ''),
@@ -1979,6 +1997,9 @@ function updateRulePriorityHint() {
 
 function getRulePayloadValue() {
 	const type = document.getElementById('rule-type').value
+	if (LOGICAL_RULE_TYPES.includes(type)) {
+		return buildLogicalPayloadFromEditor()
+	}
 	if (type === 'IN-TYPE') {
 		return Array.from(document.querySelectorAll('input[name="rule-payload-type"]:checked'))
 			.map((input) => input.value)
@@ -1992,6 +2013,13 @@ function getRulePayloadValue() {
 
 function setRulePayloadValue(value) {
 	const type = document.getElementById('rule-type').value
+	if (LOGICAL_RULE_TYPES.includes(type)) {
+		state.logicalRuleDraft = parseLogicalPayload(value)
+		if (document.querySelector('.logic-clause-list')) {
+			rerenderLogicalBuilder()
+		}
+		return
+	}
 	if (type === 'IN-TYPE') {
 		const selected = new Set(String(value || '').split('/').map((item) => item.trim().toUpperCase()).filter(Boolean))
 		document.querySelectorAll('input[name="rule-payload-type"]').forEach((input) => {
@@ -2011,6 +2039,15 @@ function setRulePayloadValue(value) {
 }
 
 function attachRulePayloadListeners() {
+	document.querySelectorAll('[data-remove-logical-index]').forEach((button) => {
+		button.addEventListener('click', () => removeLogicalClause(Number(button.getAttribute('data-remove-logical-index'))))
+	})
+	document.querySelectorAll('.logic-clause-type').forEach((select) => {
+		select.addEventListener('change', handleLogicalClauseTypeChange)
+	})
+	document.querySelectorAll('.logic-clause-value').forEach((input) => {
+		input.addEventListener('input', handleLogicalClauseValueInput)
+	})
 	const select = document.getElementById('rule-payload-select')
 	if (select) {
 		select.addEventListener('change', () => {
@@ -2035,6 +2072,23 @@ function attachRulePayloadListeners() {
 function renderRulePayloadControl(type) {
 	const container = document.getElementById('rule-payload-control')
 	if (!container) return
+
+	if (LOGICAL_RULE_TYPES.includes(type)) {
+		const clauses = getLogicalClausesForRender()
+		container.innerHTML = `
+			<div class="logic-builder">
+				<div class="logic-builder-tip">每行一个子条件，按顺序组合为当前逻辑规则。</div>
+				<div class="logic-clause-list">
+					${clauses.map((clause, index) => renderLogicalClauseRow(clause, index, type)).join('')}
+				</div>
+				<div class="logic-builder-actions">
+					<button type="button" class="btn btn-secondary" id="btn-add-logical-clause">添加子条件</button>
+				</div>
+			</div>
+		`
+		document.getElementById('btn-add-logical-clause')?.addEventListener('click', addLogicalClause)
+		return
+	}
 
 	if (type === 'IN-PORT') {
 		const listeners = Array.isArray(state.listeners) ? state.listeners : []
@@ -2084,6 +2138,178 @@ function renderRulePayloadControl(type) {
 	}
 
 	container.innerHTML = '<input type="text" id="rule-payload" placeholder="example.com" />'
+}
+
+function splitRuleSegments(raw) {
+	const parts = []
+	let current = ''
+	let depth = 0
+	for (const ch of String(raw || '')) {
+		if (ch === ',' && depth === 0) {
+			parts.push(current.trim())
+			current = ''
+			continue
+		}
+		if (ch === '(') depth += 1
+		if (ch === ')' && depth > 0) depth -= 1
+		current += ch
+	}
+	if (current || String(raw || '').endsWith(',')) parts.push(current.trim())
+	return parts
+}
+
+function stripOuterParens(raw) {
+	const value = String(raw || '').trim()
+	if (!value.startsWith('(') || !value.endsWith(')')) return value
+	let depth = 0
+	for (let i = 0; i < value.length; i += 1) {
+		const ch = value[i]
+		if (ch === '(') depth += 1
+		else if (ch === ')') depth -= 1
+		if (depth === 0 && i < value.length - 1) return value
+	}
+	return value.slice(1, -1).trim()
+}
+
+function parseLogicalPayload(payload) {
+	const normalized = String(payload || '').trim()
+	if (!normalized) return [{ type: 'DOMAIN', value: '' }]
+	const inner = stripOuterParens(normalized)
+	const clauses = splitRuleSegments(inner)
+		.map((rawClause) => {
+			const clause = stripOuterParens(rawClause)
+			const parts = splitRuleSegments(clause)
+			const type = LOGICAL_OPERAND_TYPES.includes(parts[0]) ? parts[0] : 'DOMAIN'
+			return {
+				type,
+				value: LOGICAL_OPERAND_TYPES.includes(parts[0]) ? parts.slice(1).join(',').trim() : '',
+			}
+		})
+		.filter((clause) => clause.type)
+	return clauses.length ? clauses : [{ type: 'DOMAIN', value: '' }]
+}
+
+function serializeLogicalClause(clause) {
+	const type = String(clause?.type || '').trim()
+	const value = String(clause?.value || '').trim()
+	if (!type || !value) return ''
+	return `(${type},${value})`
+}
+
+function serializeLogicalClauses(clauses) {
+	const parts = clauses.map(serializeLogicalClause).filter(Boolean)
+	return parts.length ? `(${parts.join(',')})` : ''
+}
+
+function getLogicalClausesForRender() {
+	if (Array.isArray(state.logicalRuleDraft) && state.logicalRuleDraft.length) {
+		return state.logicalRuleDraft
+	}
+	state.logicalRuleDraft = [{ type: 'DOMAIN', value: '' }]
+	return state.logicalRuleDraft
+}
+
+function renderLogicalClauseRow(clause, index, parentType) {
+	const type = LOGICAL_OPERAND_TYPES.includes(clause.type) ? clause.type : 'DOMAIN'
+	const value = type === clause.type ? clause.value : ''
+	const options = LOGICAL_OPERAND_TYPES
+		.map((option) => `<option value="${option}"${option === type ? ' selected' : ''}>${option}</option>`)
+		.join('')
+	const removeDisabled = parentType === 'NOT'
+	return `
+		<div class="logic-clause-row">
+			<div class="logic-clause-main">
+				<select class="logic-clause-type" data-index="${index}">${options}</select>
+				<input class="logic-clause-value" data-index="${index}" value="${escAttr(value || '')}" placeholder="${escAttr(getLogicalClausePlaceholder(type))}" />
+				<button type="button" class="btn btn-danger" data-remove-logical-index="${index}" ${removeDisabled ? 'disabled' : ''}>删除</button>
+			</div>
+			<div class="logic-clause-help">${escHtml(getLogicalClauseHint(type))}</div>
+		</div>
+	`
+}
+
+function getLogicalClausePlaceholder(type) {
+	switch (type) {
+		case 'DOMAIN':
+		case 'DOMAIN-SUFFIX':
+			return '例如 google.com'
+		case 'DOMAIN-KEYWORD':
+			return '例如 google'
+		case 'GEOSITE':
+			return '例如 youtube'
+		case 'GEOIP':
+			return '例如 CN'
+		case 'IP-CIDR':
+		case 'SRC-IP-CIDR':
+			return '例如 1.1.1.0/24'
+		case 'IN-PORT':
+			return '例如 7890'
+		case 'RULE-SET':
+			return '例如 reject-domain'
+		default:
+			return '输入匹配值'
+	}
+}
+
+function getLogicalClauseHint(type) {
+	return `将生成 (${type},payload) 子条件。`
+}
+
+function readLogicalClausesFromEditor() {
+	const rows = document.querySelectorAll('.logic-clause-row')
+	return Array.from(rows).map((row) => ({
+		type: row.querySelector('.logic-clause-type')?.value || 'DOMAIN',
+		value: row.querySelector('.logic-clause-value')?.value || '',
+	}))
+}
+
+function buildLogicalPayloadFromEditor() {
+	return serializeLogicalClauses(readLogicalClausesFromEditor())
+}
+
+function syncLogicalDraftFromEditor() {
+	if (!document.querySelector('.logic-clause-row')) return
+	state.logicalRuleDraft = readLogicalClausesFromEditor()
+}
+
+function rerenderLogicalBuilder() {
+	const type = document.getElementById('rule-type').value
+	if (!LOGICAL_RULE_TYPES.includes(type)) return
+	const payloadGroup = document.getElementById('payload-group')
+	renderRulePayloadControl(type)
+	attachRulePayloadListeners()
+	payloadGroup.style.display = type === 'MATCH' ? 'none' : ''
+	void refreshGeoSuggestions()
+}
+
+function handleLogicalClauseTypeChange(event) {
+	syncLogicalDraftFromEditor()
+	const input = event.target.closest('.logic-clause-main')?.querySelector('.logic-clause-value')
+	if (input) input.placeholder = getLogicalClausePlaceholder(event.target.value)
+	rerenderLogicalBuilder()
+}
+
+function handleLogicalClauseValueInput() {
+	syncLogicalDraftFromEditor()
+	void refreshGeoSuggestions()
+}
+
+function addLogicalClause() {
+	const type = document.getElementById('rule-type').value
+	const clauses = readLogicalClausesFromEditor()
+	if (type === 'NOT' && clauses.length >= 1) return
+	clauses.push({ type: 'DOMAIN', value: '' })
+	state.logicalRuleDraft = clauses
+	rerenderLogicalBuilder()
+}
+
+function removeLogicalClause(index) {
+	const type = document.getElementById('rule-type').value
+	let clauses = readLogicalClausesFromEditor().filter((_, clauseIndex) => clauseIndex !== index)
+	if (!clauses.length) clauses = [{ type: 'DOMAIN', value: '' }]
+	if (type === 'NOT' && clauses.length > 1) clauses = [clauses[0]]
+	state.logicalRuleDraft = clauses
+	rerenderLogicalBuilder()
 }
 
 function refreshRuleTypeAvailability(preferredType = '') {
@@ -2141,6 +2367,9 @@ function onRuleTypeChange() {
 	const noResolveGroup = document.getElementById('no-resolve-group')
 	const noResolveInput = document.getElementById('rule-no-resolve')
 	const previousValue = getRulePayloadValue()
+	if (!LOGICAL_RULE_TYPES.includes(type)) {
+		state.logicalRuleDraft = null
+	}
 	renderRulePayloadControl(type)
 	payloadGroup.style.display = type === 'MATCH' ? 'none' : ''
 	noResolveGroup.style.display = supportsNoResolve(type) ? '' : 'none'
@@ -2231,7 +2460,7 @@ function handleGeoSuggestionClick(event) {
 }
 
 function shouldLookupGeosite(type, payload) {
-	if (type === 'MATCH') return false
+	if (type === 'MATCH' || LOGICAL_RULE_TYPES.includes(type)) return false
 	const host = normalizeRuleHost(payload || state.ruleGeoContext.host)
 	return !!host && host.includes('.')
 }
