@@ -261,7 +261,7 @@ describe("API endpoints", () => {
         type: "inline",
         behavior: "classical",
         format: "yaml",
-        payload: ["DOMAIN-SUFFIX,ip.sb"],
+        payload: ["AND,((IN-USER,IpCheck),(DOMAIN-SUFFIX,ip.sb))"],
       }),
     })
     expect(res.status).toBe(200)
@@ -269,7 +269,7 @@ describe("API endpoints", () => {
     const stored = await env.SUB_MAGIC.get("config")
     expect(stored).toContain("rule-providers:")
     expect(stored).toContain("IpCheck:")
-    expect(stored).toContain("DOMAIN-SUFFIX,ip.sb")
+    expect(stored).toContain("AND,((IN-USER,IpCheck),(DOMAIN-SUFFIX,ip.sb))")
   })
 
   it("POST /api/config/proxy-groups accepts access key", async () => {
@@ -300,12 +300,12 @@ describe("API endpoints", () => {
         Authorization: "Bearer sm_api_testkey456",
         Origin: "chrome-extension://test",
       },
-      body: JSON.stringify({ raw: "AND,((IN-USER,IpCheck),(RULE-SET,IpCheck)),IpCheck" }),
+      body: JSON.stringify({ raw: "RULE-SET,IpCheck,IpCheck" }),
     })
     expect(res.status).toBe(200)
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("chrome-extension://test")
     const stored = await env.SUB_MAGIC.get("config")
-    expect(stored).toContain("AND,((IN-USER,IpCheck),(RULE-SET,IpCheck)),IpCheck")
+    expect(stored).toContain("RULE-SET,IpCheck,IpCheck")
   })
 
   it("POST /api/config/rules adds a rule", async () => {

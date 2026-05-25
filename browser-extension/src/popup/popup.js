@@ -57,6 +57,7 @@ const state = {
 	proxyPanelTouched: false,
 	geoSuggestionSeq: 0,
 	ipCheckByGroupKey: {},
+	ipCheckKnownDomains: [],
 }
 
 const IPCHECK_GROUP_NAME = 'IpCheck'
@@ -66,6 +67,9 @@ const IPCHECK_RULE_DOMAINS = [
 	'ip.sb',
 	'api.ip.sb',
 	'ipapi.is',
+	'ipapi.co',
+	'ipinfo.io',
+	'api.db-ip.com',
 	'chatgpt.com',
 	'openai.com',
 	'claude.ai',
@@ -79,6 +83,8 @@ const IPCHECK_RULE_DOMAINS = [
 	'primevideo.com',
 	'ipv6.netflix.com',
 ]
+
+state.ipCheckKnownDomains = [...IPCHECK_RULE_DOMAINS]
 
 let pollTimer = null
 let proxyRefreshTimer = null
@@ -102,6 +108,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 	document.getElementById('btn-toggle-proxy-panel').addEventListener('click', toggleProxyPanel)
 	document.getElementById('rule-type').addEventListener('change', onRuleTypeChange)
 	document.getElementById('selector-result').addEventListener('click', handleSelectorResultClick)
+	document.getElementById('ipcheck-result').addEventListener('click', handleIpCheckResultClick)
 	document.getElementById('geo-suggestion-box').addEventListener('click', handleGeoSuggestionClick)
 	document.getElementById('proxy-port').addEventListener('change', () => refreshProxyForm())
 	document.getElementById('proxy-type').addEventListener('change', () => refreshProxyForm())
@@ -973,15 +980,21 @@ function renderIpCheckPanel(group) {
 	const details = entry.details || {}
 	const services = entry.services || {}
 	const references = entry.references || {}
-	const mapRows = (rows) => rows.map(([label, value]) => `<div class="ipcheck-row"><span>${escHtml(label)}</span><strong>${escHtml(value || '-')}</strong></div>`).join('')
+	const uncoveredRedirectDomains = getIpCheckUncoveredRedirectDomains(entry)
+	const mapRows = (rows) => rows.map(([label, value]) => {
+		const content = value && typeof value === 'object' && 'html' in value
+			? value.html
+			: `<strong>${escHtml(value || '-')}</strong>`
+		return `<div class="ipcheck-row"><span>${escHtml(label)}</span>${content}</div>`
+	}).join('')
 	const renderMatrix = (columns, rows) => `
 		<div class="ipcheck-matrix">
-			<div class="ipcheck-matrix-row header">
+			<div class="ipcheck-matrix-row header" style="grid-template-columns: 88px repeat(${columns.length}, minmax(0, 1fr));">
 				<div class="ipcheck-matrix-cell label"></div>
 				${columns.map((column) => `<div class="ipcheck-matrix-cell">${escHtml(column)}</div>`).join('')}
 			</div>
 			${rows.map((row) => `
-				<div class="ipcheck-matrix-row">
+				<div class="ipcheck-matrix-row" style="grid-template-columns: 88px repeat(${columns.length}, minmax(0, 1fr));">
 					<div class="ipcheck-matrix-cell label">${escHtml(row.label)}</div>
 					${row.values.map((value) => `<div class="ipcheck-matrix-cell">${escHtml(value || '-')}</div>`).join('')}
 				</div>
@@ -1001,9 +1014,132 @@ function renderIpCheckPanel(group) {
 		if (!source) return '不可用'
 		return values.map((value) => source[value]).filter(Boolean).join(' / ') || '无'
 	}
+	const formatCoordinates = (latitude, longitude) => {
+		const parts = [latitude, longitude]
+			.map((value) => String(value || '').trim())
+			.filter(Boolean)
+		return parts.length === 2 ? parts.join(', ') : ''
+	}
+	const formatAsnValue = (value) => {
+		const text = String(value || '').trim()
+		if (!text) return ''
+		return /^AS/i.test(text) ? text : `AS${text}`
+	}
+	const formatBooleanBadge = (value) => value === true ? '是' : value === false ? '否' : '无'
+	const coordinateParts = [details.latitude, details.longitude]
+		.map((value) => String(value || '').trim())
+		.filter(Boolean)
+	const coordinateText = coordinateParts.length === 2 ? coordinateParts.join(', ') : ''
+	const coordinateLink = coordinateParts.length === 2
+		? {
+			html: `<strong><a class="ipcheck-link" href="https://www.google.com/maps?q=${encodeURIComponent(coordinateParts.join(','))}" target="_blank" rel="noopener noreferrer">${escHtml(coordinateText)}</a></strong>`,
+		}
+		: '-'
+	const ping0Link = entry.ip
+		? {
+			html: `<strong><a class="ipcheck-link" href="https://www.ping0.cc/ip/${encodeURIComponent(entry.ip)}" target="_blank" rel="noopener noreferrer">https://www.ping0.cc/ip/${escHtml(entry.ip)}</a></strong>`,
+		}
+		: '-'
 	const yesNoUnknown = (value) => value === true ? '是' : value === false ? '否' : '无'
+	const quality = entry.raw?.quality || {}
+	const geo = entry.raw?.geo || {}
 	const qualitySecurity = entry.raw?.quality?.security || {}
 	const qualityCompany = entry.raw?.quality?.company || {}
+	const geographyMatrix = renderMatrix(
+		['ipapi.is', 'ip.sb', 'IPinfo', 'ipapi.co', 'DB-IP'],
+		[
+			{
+				label: 'IP',
+				values: [
+					quality?.ip || '无',
+					geo?.ip || '无',
+					references.ipinfo?.ip || '无',
+					references.ipapiCo?.ip || '无',
+					references.dbIp?.ip || '无',
+				],
+			},
+			{
+				label: '地区',
+				values: [
+					quality?.location?.country_code || quality?.location?.country || '无',
+					geo?.country_code || geo?.country || '无',
+					references.ipinfo?.country || '无',
+					references.ipapiCo?.country || '无',
+					references.dbIp?.country || '无',
+				],
+			},
+			{
+				label: '区域',
+				values: [
+					quality?.location?.state || quality?.location?.region || '无',
+					geo?.region || '无',
+					references.ipinfo?.region || '无',
+					references.ipapiCo?.region || '无',
+					references.dbIp?.region || '无',
+				],
+			},
+			{
+				label: '城市',
+				values: [
+					quality?.location?.city || '无',
+					geo?.city || '无',
+					references.ipinfo?.city || '无',
+					references.ipapiCo?.city || '无',
+					references.dbIp?.city || '无',
+				],
+			},
+			{
+				label: '邮编',
+				values: [
+					quality?.location?.zip || quality?.location?.postal_code || '无',
+					'无',
+					references.ipinfo?.postal || '无',
+					references.ipapiCo?.postal || '无',
+					'无',
+				],
+			},
+			{
+				label: '时区',
+				values: [
+					quality?.location?.timezone || '无',
+					geo?.timezone || '无',
+					references.ipinfo?.timezone || '无',
+					references.ipapiCo?.timezone || '无',
+					'无',
+				],
+			},
+			{
+				label: '坐标',
+				values: [
+					formatCoordinates(quality?.location?.latitude, quality?.location?.longitude) || '无',
+					formatCoordinates(geo?.latitude, geo?.longitude) || '无',
+					references.ipinfo?.loc || '无',
+					formatCoordinates(references.ipapiCo?.latitude, references.ipapiCo?.longitude) || '无',
+					formatCoordinates(references.dbIp?.latitude, references.dbIp?.longitude) || '无',
+				],
+			},
+			{
+				label: 'ASN',
+				values: [
+					formatAsnValue(qualityCompany?.asn) || '无',
+					formatAsnValue(geo?.asn) || '无',
+					'无',
+					formatAsnValue(references.ipapiCo?.asn) || '无',
+					'无',
+				],
+			},
+			{
+				label: '组织',
+				values: [
+					qualityCompany?.name || '无',
+					geo?.asn_organization || geo?.organization || geo?.isp || '无',
+					references.ipinfo?.org || '无',
+					references.ipapiCo?.org || '无',
+					references.dbIp?.isp || '无',
+				],
+			},
+		]
+	)
 	const riskMatrix = renderMatrix(
 		['ipapi.is', 'IPinfo', 'ipapi.co', 'DB-IP'],
 		[
@@ -1120,13 +1256,22 @@ function renderIpCheckPanel(group) {
 	)
 	resultEl.innerHTML = `
 		<div class="ipcheck-result success">
+			${uncoveredRedirectDomains.length > 0 ? `
+				<div class="ipcheck-group">
+					<div class="ipcheck-group-title">重定向规则补齐</div>
+					<div class="ipcheck-redirect-note">以下重定向后的域名未被当前 IpCheck 规则覆盖：</div>
+					<div class="ipcheck-redirect-list">${uncoveredRedirectDomains.map((domain) => `<code>${escHtml(domain)}</code>`).join('')}</div>
+					<div class="ipcheck-redirect-actions">
+						<button class="btn btn-secondary btn-ipcheck-retry-redirect" data-route-key="${escAttr(buildRoutingGroupKey(group))}">添加规则并重试</button>
+					</div>
+				</div>
+			` : ''}
 			<div class="ipcheck-group">
 				<div class="ipcheck-group-title">基础信息</div>
 				${mapRows([
 					['IP', entry.ip || '-'],
 					['地区', location || '未知'],
-					['洲', details.continent || '-'],
-					['区域', details.region || '-'],
+					['坐标', coordinateLink],
 					['邮编', details.postal || '-'],
 					['时区', details.timezone || '-'],
 				])}
@@ -1165,19 +1310,21 @@ function renderIpCheckPanel(group) {
 				])}
 			</div>
 			<div class="ipcheck-group">
-				<div class="ipcheck-group-title">多库交叉画像</div>
+				<div class="ipcheck-group-title">多源地理对照</div>
+				${geographyMatrix}
+			</div>
+			<div class="ipcheck-group">
+				<div class="ipcheck-group-title">附加画像</div>
 				${mapRows([
 					['IPinfo', buildReferenceValue(references.ipinfo, ['country', 'region', 'city', 'org'])],
 					['ipapi.co', buildReferenceValue(references.ipapiCo, ['country', 'region', 'city', 'org'])],
 					['DB-IP', buildReferenceValue(references.dbIp, ['country', 'region', 'city'])],
-					['坐标', [
-						references.ipapiCo?.latitude && references.ipapiCo?.longitude ? `${references.ipapiCo.latitude}, ${references.ipapiCo.longitude}` : '',
-						references.ipinfo?.loc || '',
-					].filter(Boolean).join(' / ') || '-'],
+					['Ping0 页面', ping0Link],
+					['欧盟区域', formatBooleanBadge(references.ipapiCo?.inEu)],
+					['国家面积', references.ipapiCo?.countryArea ? `${references.ipapiCo.countryArea}` : '-'],
+					['国家人口', references.ipapiCo?.countryPopulation ? `${references.ipapiCo.countryPopulation}` : '-'],
 					['地图', (() => {
-						const loc = references.ipapiCo?.latitude && references.ipapiCo?.longitude
-							? `${references.ipapiCo.latitude},${references.ipapiCo.longitude}`
-							: references.ipinfo?.loc || ''
+						const loc = formatCoordinates(references.ipapiCo?.latitude, references.ipapiCo?.longitude) || references.ipinfo?.loc || ''
 						return loc ? `https://www.google.com/maps?q=${loc}` : '-'
 					})()],
 				])}
@@ -1214,6 +1361,37 @@ function renderIpCheckPanel(group) {
 			</details>
 		</div>
 	`
+}
+
+function getKnownIpCheckDomains() {
+	return Array.isArray(state.ipCheckKnownDomains) && state.ipCheckKnownDomains.length > 0
+		? state.ipCheckKnownDomains
+		: IPCHECK_RULE_DOMAINS
+}
+
+function isIpCheckDomainCovered(hostname, domains = getKnownIpCheckDomains()) {
+	const host = String(hostname || '').trim().toLowerCase()
+	if (!host) return false
+	return domains.some((domain) => {
+		const normalized = String(domain || '').trim().toLowerCase()
+		return normalized && (host === normalized || host.endsWith(`.${normalized}`))
+	})
+}
+
+function getIpCheckUncoveredRedirectDomains(entry) {
+	const rawServices = entry?.raw?.services || {}
+	const domains = Object.values(rawServices)
+		.map((item) => {
+			const url = String(item?.url || '').trim()
+			if (!url) return ''
+			try {
+				return new URL(url).hostname
+			} catch {
+				return ''
+			}
+		})
+		.filter(Boolean)
+	return [...new Set(domains.filter((domain) => !isIpCheckDomainCovered(domain)))]
 }
 
 function getIpCheckBaseProfile() {
@@ -1256,9 +1434,14 @@ async function resolveIpCheckPassword() {
 	return IPCHECK_DEFAULT_PASSWORD
 }
 
-async function ensureIpCheckConfig(targetGroup, password) {
+async function ensureIpCheckConfig(targetGroup, password, extraDomains = []) {
 	const messages = []
 	const remoteEnabled = !!(state.subMagic.url && state.subMagic.accessKey)
+	const mergedDomains = [...new Set([
+		...getKnownIpCheckDomains(),
+		...extraDomains.map((item) => String(item || '').trim()).filter(Boolean),
+	])]
+	state.ipCheckKnownDomains = mergedDomains
 
 	if (remoteEnabled) {
 		try {
@@ -1267,7 +1450,7 @@ async function ensureIpCheckConfig(targetGroup, password) {
 				username: IPCHECK_USERNAME,
 				password,
 				groupName: IPCHECK_GROUP_NAME,
-				domains: IPCHECK_RULE_DOMAINS,
+				domains: mergedDomains,
 			})
 			if (remoteResult.changed) {
 				messages.push('远程配置已补齐')
@@ -1283,7 +1466,7 @@ async function ensureIpCheckConfig(targetGroup, password) {
 		username: IPCHECK_USERNAME,
 		password,
 		groupName: IPCHECK_GROUP_NAME,
-		domains: IPCHECK_RULE_DOMAINS,
+		domains: mergedDomains,
 	})
 	password = localResult.authUser?.password || password
 	if (localResult.changed) {
@@ -1296,7 +1479,7 @@ async function ensureIpCheckConfig(targetGroup, password) {
 	}
 }
 
-async function handleIpCheck(group) {
+async function handleIpCheck(group, options = {}) {
 	const targetGroup = resolveIpCheckTarget(group.chain)
 	if (!targetGroup || targetGroup === 'DIRECT') {
 		setIpCheckState(group, { status: 'error', message: '当前链路没有可检测的代理组' })
@@ -1315,7 +1498,7 @@ async function handleIpCheck(group) {
 		updateRoutingDisplay(state.routingData || { groups: [] })
 
 		const ipCheckPassword = await resolveIpCheckPassword()
-		const ensured = await ensureIpCheckConfig(targetGroup, ipCheckPassword)
+		const ensured = await ensureIpCheckConfig(targetGroup, ipCheckPassword, options.extraDomains || [])
 		await setProxySelector(state.mihomo.url, state.mihomo.secret, IPCHECK_GROUP_NAME, targetGroup)
 		await refreshProxyData()
 
@@ -1345,6 +1528,21 @@ async function handleIpCheck(group) {
 		setIpCheckState(group, { status: 'error', message: error.message || 'IP 检测失败' })
 		updateRoutingDisplay(state.routingData || { groups: [] })
 	}
+}
+
+async function handleIpCheckResultClick(event) {
+	const button = event.target.closest('.btn-ipcheck-retry-redirect')
+	if (!button) return
+	const routeKey = String(button.dataset.routeKey || '').trim()
+	if (!routeKey) return
+	const groups = Array.isArray(state.routingData?.groups) ? state.routingData.groups : []
+	const group = groups.find((item) => buildRoutingGroupKey(item) === routeKey)
+	if (!group) return
+	const entry = getIpCheckState(group)
+	const extraDomains = getIpCheckUncoveredRedirectDomains(entry)
+	if (extraDomains.length === 0) return
+	button.disabled = true
+	await handleIpCheck(group, { extraDomains })
 }
 
 function renderIssueLine(group) {

@@ -278,21 +278,36 @@ function serializeAuthUsers(users) {
 	return users.map((user) => `${user.username}:${user.password}`)
 }
 
-function buildIpCheckRuleProvider(domains) {
+function buildIpCheckRuleProvider(domains, username = 'IpCheck') {
 	return {
 		type: 'inline',
 		behavior: 'classical',
 		format: 'yaml',
-		payload: ensureUniqueValues(domains).map((domain) => `DOMAIN-SUFFIX,${domain}`),
+		payload: ensureUniqueValues(domains).map((domain) => `AND,((IN-USER,${username}),(DOMAIN-SUFFIX,${domain}))`),
 	}
 }
 
-function buildIpCheckRule(providerName = 'IpCheck', groupName = 'IpCheck', username = 'IpCheck') {
-	return `AND,((IN-USER,${username}),(RULE-SET,${providerName})),${groupName}`
+function buildIpCheckRule(providerName = 'IpCheck', groupName = 'IpCheck') {
+	return `RULE-SET,${providerName},${groupName}`
 }
 
 function ensureUniqueValues(values) {
 	return [...new Set((values || []).map((value) => String(value || '').trim()).filter(Boolean))]
+}
+
+function extractIpCheckProviderDomains(provider, username = 'IpCheck') {
+	const payload = Array.isArray(provider?.payload) ? provider.payload : []
+	const domains = []
+	const pattern = new RegExp(`IN-USER,${username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)\\s*,\\s*\\(DOMAIN-SUFFIX,([^\\)]+)\\)`, 'i')
+	for (const entry of payload) {
+		const text = String(entry || '').trim()
+		if (!text) continue
+		const match = text.match(pattern)
+		if (match && match[1]) {
+			domains.push(match[1].trim())
+		}
+	}
+	return ensureUniqueValues(domains)
 }
 
 function findIpCheckRuleAnchor(currentRules) {
@@ -309,19 +324,20 @@ function findIpCheckRuleAnchor(currentRules) {
 }
 
 function removeManagedIpCheckRules(currentRules, providerName = 'IpCheck', groupName = 'IpCheck', username = 'IpCheck') {
-	const canonicalRule = buildIpCheckRule(providerName, groupName, username)
+	const canonicalRule = buildIpCheckRule(providerName, groupName)
 	return currentRules.filter((rule) => {
 		const normalized = String(rule || '').trim()
 		if (!normalized) return false
 		if (normalized === canonicalRule) return false
-		if (normalized.includes(`IN-USER,${username}`) && normalized.endsWith(`,${groupName}`)) return false
-		if (normalized.startsWith(`RULE-SET,${providerName},`) && normalized.endsWith(`,${groupName}`)) return false
+		if (normalized.includes(`IN-USER,${username}`)) return false
+		if (normalized.includes(`RULE-SET,${providerName}`)) return false
+		if (normalized.endsWith(`,${groupName}`) && normalized.includes('DOMAIN-SUFFIX,')) return false
 		return true
 	})
 }
 
 function insertRuleWithAnchor(currentRules, rule, anchor = '') {
-	const nextRules = [...currentRules]
+	const nextRules = currentRules.filter((item) => String(item || '').trim() !== String(rule || '').trim())
 	const insertIdx = anchor ? getInsertIndex(nextRules, anchor) : 0
 	nextRules.splice(insertIdx, 0, rule)
 	return nextRules
@@ -384,7 +400,8 @@ export async function ensureIpCheckLocalConfig(mihomoUrl, secret, options = {}) 
 	const currentProviders = (currentConfig['rule-providers'] && typeof currentConfig['rule-providers'] === 'object')
 		? { ...currentConfig['rule-providers'] }
 		: {}
-	const nextProvider = buildIpCheckRuleProvider(domains)
+	const existingProviderDomains = extractIpCheckProviderDomains(currentProviders[providerName], username)
+	const nextProvider = buildIpCheckRuleProvider([...existingProviderDomains, ...domains], username)
 	if (JSON.stringify(currentProviders[providerName] || {}) !== JSON.stringify(nextProvider)) {
 		currentProviders[providerName] = nextProvider
 		changed = true
@@ -392,9 +409,10 @@ export async function ensureIpCheckLocalConfig(mihomoUrl, secret, options = {}) 
 
 	const currentRules = normalizeRules(currentConfig.rules)
 	const anchor = findIpCheckRuleAnchor(currentRules)
-	const baseRules = removeManagedIpCheckRules(currentRules, providerName, groupName, username)
-	const canonicalRule = buildIpCheckRule(providerName, groupName, username)
-	const nextRules = insertRuleWithAnchor(baseRules, canonicalRule, anchor)
+	const canonicalRule = buildIpCheckRule(providerName, groupName)
+	const nextRules = currentRules.includes(canonicalRule)
+		? currentRules
+		: insertRuleWithAnchor(currentRules, canonicalRule, anchor)
 	if (JSON.stringify(nextRules) !== JSON.stringify(currentRules)) {
 		changed = true
 	}
@@ -686,7 +704,8 @@ export async function ensureIpCheckRemoteConfig(subMagicUrl, accessKey, options 
 	const remoteProviders = await getRemoteRuleProviders(subMagicUrl, accessKey)
 	const providers = Array.isArray(remoteProviders) ? remoteProviders : []
 	const existingProvider = providers.find((provider) => String(provider?.name || '') === providerName) || null
-	const nextProvider = buildIpCheckRuleProvider(domains)
+	const existingProviderDomains = extractIpCheckProviderDomains(existingProvider, username)
+	const nextProvider = buildIpCheckRuleProvider([...existingProviderDomains, ...domains], username)
 	if (!existingProvider) {
 		await createRemoteRuleProvider(subMagicUrl, accessKey, {
 			name: providerName,
@@ -707,9 +726,10 @@ export async function ensureIpCheckRemoteConfig(subMagicUrl, accessKey, options 
 		? remoteRules.map((item) => ruleEntryToString(item?.raw || item)).filter(Boolean)
 		: []
 	const anchor = findIpCheckRuleAnchor(currentRules)
-	const baseRules = removeManagedIpCheckRules(currentRules, providerName, groupName, username)
-	const canonicalRule = buildIpCheckRule(providerName, groupName, username)
-	const nextRules = insertRuleWithAnchor(baseRules, canonicalRule, anchor)
+	const canonicalRule = buildIpCheckRule(providerName, groupName)
+	const nextRules = currentRules.includes(canonicalRule)
+		? currentRules
+		: insertRuleWithAnchor(currentRules, canonicalRule, anchor)
 	if (JSON.stringify(nextRules) !== JSON.stringify(currentRules)) {
 		await replaceRemoteRules(subMagicUrl, accessKey, nextRules)
 		changed = true

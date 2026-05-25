@@ -320,14 +320,43 @@ function buildIpCheckDetails(quality = {}, geo = {}) {
 	}
 }
 
-async function fetchJsonWithTimeout(url, timeoutMs = 8000) {
+function buildJsonFetchError(url, status, text = '') {
+	const hostname = (() => {
+		try {
+			return new URL(url).hostname
+		} catch {
+			return ''
+		}
+	})()
+	const body = String(text || '').slice(0, 120)
+	if (hostname === 'ipapi.co') {
+		if (status === 403) return new Error(`HTTP 403: ipapi.co 拒绝请求${body ? ` - ${body}` : ''}`)
+		if (status === 429) return new Error('HTTP 429: ipapi.co 配额已超限')
+	}
+	if (hostname === 'api.ipapi.is') {
+		if (status === 429) return new Error('HTTP 429: ipapi.is 配额已超限')
+		if (status >= 500) return new Error(`HTTP ${status}: ipapi.is 服务暂时不可用`)
+	}
+	return new Error(`HTTP ${status}: ${body}`)
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = 8000, options = {}) {
 	const controller = new AbortController()
 	const timer = setTimeout(() => controller.abort(), timeoutMs)
 	try {
-		const res = await fetch(url, { signal: controller.signal, cache: 'no-store' })
+		const res = await fetch(url, {
+			signal: controller.signal,
+			cache: 'no-store',
+			headers: {
+				Accept: 'application/json, text/plain, */*',
+				...options.headers,
+			},
+			method: options.method || 'GET',
+			body: options.body,
+		})
 		if (!res.ok) {
 			const text = await res.text()
-			throw new Error(`HTTP ${res.status}: ${text.slice(0, 120)}`)
+			throw buildJsonFetchError(url, res.status, text)
 		}
 		return await res.json()
 	} finally {
@@ -468,7 +497,11 @@ async function probeServiceMatrix() {
 async function probeReferenceDatabases() {
 	const tasks = {
 		ipinfo: fetchJsonWithTimeout('https://ipinfo.io/json', 10000),
-		ipapiCo: fetchJsonWithTimeout('https://ipapi.co/json/', 10000),
+		ipapiCo: fetchJsonWithTimeout('https://ipapi.co/json/', 10000, {
+			headers: {
+				'User-Agent': 'sub-magic-ipcheck/1.0',
+			},
+		}),
 		dbIp: fetchJsonWithTimeout('https://api.db-ip.com/v2/free/self', 10000),
 	}
 
@@ -546,7 +579,7 @@ async function runIpCheckProbe(payload) {
 	try {
 		return await applyTemporaryGlobalProfile(probeProfile, async () => {
 			const [qualityRes, geoRes, serviceRes, refsRes] = await Promise.allSettled([
-				fetchJsonWithTimeout('https://ipapi.is/json'),
+				fetchJsonWithTimeout('https://api.ipapi.is'),
 				fetchJsonWithTimeout('https://api.ip.sb/geoip'),
 				probeServiceMatrix(),
 				probeReferenceDatabases(),
@@ -567,7 +600,7 @@ async function runIpCheckProbe(payload) {
 			const city = quality?.location?.city || geo?.city || ''
 			const asn = quality?.company?.asn || geo?.asn || ''
 			const isp = quality?.company?.name || geo?.isp || geo?.organization || ''
-			const summary = buildIpCheckSummary(quality || {})
+			const summary = quality ? buildIpCheckSummary(quality) : { risk: '未知', tags: [] }
 			const details = buildIpCheckDetails(quality || {}, geo || {})
 
 			return {
