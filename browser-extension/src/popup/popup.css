@@ -122,6 +122,12 @@ body {
 	font-family: inherit;
 }
 
+.btn-link:disabled {
+	color: var(--text-muted);
+	cursor: not-allowed;
+	text-decoration: none;
+}
+
 .btn-icon {
 	background: none;
 	border: none;

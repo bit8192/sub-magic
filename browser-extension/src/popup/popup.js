@@ -103,6 +103,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 	document.getElementById('btn-back-selector').addEventListener('click', showRoutingPanel)
 	document.getElementById('btn-back-ipcheck').addEventListener('click', showRoutingPanel)
 	document.getElementById('btn-settings').addEventListener('click', () => chrome.runtime.openOptionsPage())
+	document.getElementById('btn-management-page').addEventListener('click', openManagementPage)
 	document.getElementById('btn-control-panel').addEventListener('click', openControlPanel)
 	document.getElementById('btn-apply-proxy').addEventListener('click', handleApplyProxy)
 	document.getElementById('btn-toggle-proxy-panel').addEventListener('click', toggleProxyPanel)
@@ -164,6 +165,12 @@ async function loadSettings() {
 	if (data.subMagicKey) state.subMagic.accessKey = data.subMagicKey
 
 	document.getElementById('routing-section').style.display = state.mihomo.url ? '' : 'none'
+	refreshManagementPageButton()
+}
+
+function refreshManagementPageButton() {
+	const button = document.getElementById('btn-management-page')
+	button.disabled = !state.subMagic.url
 }
 
 async function refreshControlPanelButton() {
@@ -192,6 +199,16 @@ function joinExternalUiUrl(baseUrl, externalUi) {
 function openControlPanel() {
 	if (!(state.mihomo.url && state.externalUi)) return
 	const url = joinExternalUiUrl(state.mihomo.url, state.externalUi)
+	if (chrome.tabs?.create) {
+		chrome.tabs.create({ url })
+		return
+	}
+	window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+function openManagementPage() {
+	if (!state.subMagic.url) return
+	const url = ensureHttpUrl(state.subMagic.url)
 	if (chrome.tabs?.create) {
 		chrome.tabs.create({ url })
 		return
