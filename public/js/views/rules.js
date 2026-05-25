@@ -169,7 +169,7 @@ export async function showRuleForm(index, draft = null) {
       <label class="checkbox-line" id="rf-src-line">src <input type="checkbox" id="rf-src" ${state.src ? 'checked' : ''} /></label>
       <div class="form-group">
         <label>其它附加参数</label>
-        <input id="rf-extra-params" value="${esc((state.params || []).filter(p => p !== 'no-resolve' && p !== 'src').join(', '))}" placeholder="逗号分隔，例如 custom-flag" />
+        <input id="rf-extra-params" value="${esc((state.params || []).filter(p => p !== 'no-resolve' && p !== 'src').join(', '))}" placeholder="逗号分隔，例如 no-resolve、src" />
       </div>
     </div>
 
