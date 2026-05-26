@@ -193,8 +193,12 @@ export async function showRuleForm(index, draft = null) {
   if (targetGroup) targetGroup.dataset.initialTarget = state.target || ''
 
   ;['rf-type', 'rf-noresolve', 'rf-src', 'rf-extra-params'].forEach(id => {
-    document.getElementById(id)?.addEventListener(id === 'rf-type' ? 'change' : 'input', updateRuleFormUI)
-    if (id === 'rf-noresolve' || id === 'rf-src') document.getElementById(id)?.addEventListener('change', updateRuleFormUI)
+    if (id === 'rf-type') {
+      document.getElementById(id)?.addEventListener('change', updateRuleFormUI)
+      return
+    }
+    document.getElementById(id)?.addEventListener('input', syncRulePreviewOnly)
+    if (id === 'rf-noresolve' || id === 'rf-src') document.getElementById(id)?.addEventListener('change', syncRulePreviewOnly)
   })
   updateRuleFormUI()
 }
@@ -283,14 +287,14 @@ function renderTargetControl(type, value) {
 
   if (type === 'SUB-RULE') {
     container.innerHTML = `<input id="rf-target-input" value="${esc(value || '')}" placeholder="输入子规则名称" />`
-    container.querySelector('#rf-target-input')?.addEventListener('input', updateRuleFormUI)
+    container.querySelector('#rf-target-input')?.addEventListener('input', syncRulePreviewOnly)
     return
   }
 
   const options = ['<option value=""></option>']
     .concat(ruleTargetOptions.map(option => `<option value="${esc(option)}"${option === value ? ' selected' : ''}>${esc(option)}</option>`))
   container.innerHTML = `<select id="rf-target-select">${options.join('')}</select>`
-  container.querySelector('#rf-target-select')?.addEventListener('change', updateRuleFormUI)
+  container.querySelector('#rf-target-select')?.addEventListener('change', syncRulePreviewOnly)
 }
 
 function renderPayloadControl(type, value) {
@@ -322,7 +326,7 @@ function renderPayloadControl(type, value) {
     const options = ['<option value=""></option>']
       .concat(ruleOptionMeta.users.map(user => `<option value="${esc(user.username)}"${user.username === value ? ' selected' : ''}>${esc(user.username)}</option>`))
     container.innerHTML = `<select id="rf-payload-select">${options.join('')}</select>`
-    container.querySelector('#rf-payload-select')?.addEventListener('change', updateRuleFormUI)
+    container.querySelector('#rf-payload-select')?.addEventListener('change', syncRulePreviewOnly)
     return
   }
 
@@ -330,7 +334,7 @@ function renderPayloadControl(type, value) {
     const options = ['<option value=""></option>']
       .concat(PROXY_RULE_TYPES.map(item => `<option value="${item}"${item === value ? ' selected' : ''}>${item}</option>`))
     container.innerHTML = `<select id="rf-payload-select">${options.join('')}</select>`
-    container.querySelector('#rf-payload-select')?.addEventListener('change', updateRuleFormUI)
+    container.querySelector('#rf-payload-select')?.addEventListener('change', syncRulePreviewOnly)
     return
   }
 
@@ -338,7 +342,7 @@ function renderPayloadControl(type, value) {
     const options = ['<option value=""></option>']
       .concat(ruleOptionMeta.listeners.map(listener => `<option value="${esc(listener.name)}"${listener.name === value ? ' selected' : ''}>${esc(listener.name)} · ${esc(listener.type || '')}</option>`))
     container.innerHTML = `<select id="rf-payload-select">${options.join('')}</select>`
-    container.querySelector('#rf-payload-select')?.addEventListener('change', updateRuleFormUI)
+    container.querySelector('#rf-payload-select')?.addEventListener('change', syncRulePreviewOnly)
     return
   }
 
@@ -351,12 +355,12 @@ function renderPayloadControl(type, value) {
         ${portOptions.map(option => `<option value="${esc(option)}"></option>`).join('')}
       </datalist>
     `
-    container.querySelector('#rf-payload-input')?.addEventListener('input', updateRuleFormUI)
+    container.querySelector('#rf-payload-input')?.addEventListener('input', syncRulePreviewOnly)
     return
   }
 
   container.innerHTML = `<textarea id="rf-payload" rows="3" placeholder="例如 google.com、CN、80、((DOMAIN,baidu.com),(NETWORK,UDP))">${esc(value || '')}</textarea>`
-  container.querySelector('#rf-payload')?.addEventListener('input', updateRuleFormUI)
+  container.querySelector('#rf-payload')?.addEventListener('input', syncRulePreviewOnly)
 }
 
 function renderLogicalClauseRow(clause, index, parentType) {
