@@ -13,9 +13,6 @@
 	"assets": {
 		"directory": "./public"
 	},
-	"vars": {
-		"PASSWORD": "admin"
-	},
 	"observability": {
 		"enabled": true
 	},
