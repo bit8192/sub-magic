@@ -1,4 +1,5 @@
 import { parseConfig, serializeConfig, type ClashConfig } from './yaml'
+import { getConfigSyncDO } from './durable-objects/config-sync'
 
 const KV_CONFIG_KEY = 'config'
 const KV_PASSWORD_HASH = 'password_hash'
@@ -9,19 +10,51 @@ function kv(env: Env): KVNamespace | null {
   return (env as any).SUB_MAGIC ?? null
 }
 
+function hasDO(env: Env): boolean {
+  return !!(env as any).CONFIG_SYNC
+}
+
+function getDO(env: Env) {
+  return getConfigSyncDO(env)
+}
+
+/* ─── Config: prefer DO, fallback KV ─── */
+
 export async function getConfig(env: Env): Promise<string | null> {
+  if (hasDO(env)) {
+    try {
+      return await getDO(env).getConfig()
+    } catch (e) {
+      console.error('DO getConfig failed, falling back to KV:', e)
+    }
+  }
   const ns = kv(env)
   if (!ns) return null
   return await ns.get(KV_CONFIG_KEY)
 }
 
 export async function saveConfig(env: Env, yamlText: string): Promise<void> {
+  if (hasDO(env)) {
+    try {
+      await getDO(env).setConfig(yamlText)
+      return
+    } catch (e) {
+      console.error('DO setConfig failed, falling back to KV:', e)
+    }
+  }
   const ns = kv(env)
   if (!ns) return
   await ns.put(KV_CONFIG_KEY, yamlText)
 }
 
 export async function getParsedConfig(env: Env): Promise<ClashConfig> {
+  if (hasDO(env)) {
+    try {
+      return await getDO(env).getParsedConfig()
+    } catch (e) {
+      console.error('DO getParsedConfig failed, falling back to KV:', e)
+    }
+  }
   const raw = await getConfig(env)
   if (!raw) return {}
   return parseConfig(raw)
@@ -30,6 +63,8 @@ export async function getParsedConfig(env: Env): Promise<ClashConfig> {
 export async function saveParsedConfig(env: Env, config: ClashConfig): Promise<void> {
   await saveConfig(env, serializeConfig(config))
 }
+
+/* ─── Auth/Keys: keep in KV (needs TTL for sessions) ─── */
 
 export async function getSubscriptionKey(env: Env): Promise<string | null> {
   const ns = kv(env)
@@ -67,7 +102,7 @@ export async function setPasswordHash(env: Env, hash: string): Promise<void> {
   await ns.put(KV_PASSWORD_HASH, hash)
 }
 
-const VERSIONS_INDEX_KEY = 'versions:index'
+/* ─── Versions: prefer DO, fallback KV ─── */
 
 export interface ConfigVersion {
   id: string
@@ -75,7 +110,17 @@ export interface ConfigVersion {
   label: string
 }
 
+const VERSIONS_INDEX_KEY = 'versions:index'
+
 export async function saveConfigVersion(env: Env, label?: string): Promise<ConfigVersion> {
+  if (hasDO(env)) {
+    try {
+      return await getDO(env).saveVersion(label)
+    } catch (e) {
+      console.error('DO saveVersion failed, falling back to KV:', e)
+    }
+  }
+
   const ns = kv(env)
   if (!ns) throw new Error('KV not bound')
   const config = await getConfig(env)
@@ -95,6 +140,13 @@ export async function saveConfigVersion(env: Env, label?: string): Promise<Confi
 }
 
 export async function getConfigVersions(env: Env): Promise<ConfigVersion[]> {
+  if (hasDO(env)) {
+    try {
+      return await getDO(env).getVersions()
+    } catch (e) {
+      console.error('DO getVersions failed, falling back to KV:', e)
+    }
+  }
   const ns = kv(env)
   if (!ns) return []
   const raw = await ns.get(VERSIONS_INDEX_KEY)
@@ -102,12 +154,26 @@ export async function getConfigVersions(env: Env): Promise<ConfigVersion[]> {
 }
 
 export async function getConfigVersion(env: Env, id: string): Promise<string | null> {
+  if (hasDO(env)) {
+    try {
+      return await getDO(env).getVersion(id)
+    } catch (e) {
+      console.error('DO getVersion failed, falling back to KV:', e)
+    }
+  }
   const ns = kv(env)
   if (!ns) return null
   return await ns.get(`version:${id}`)
 }
 
 export async function restoreConfigVersion(env: Env, id: string): Promise<boolean> {
+  if (hasDO(env)) {
+    try {
+      return await getDO(env).restoreVersion(id)
+    } catch (e) {
+      console.error('DO restoreVersion failed, falling back to KV:', e)
+    }
+  }
   const ns = kv(env)
   if (!ns) return false
   const config = await ns.get(`version:${id}`)
@@ -117,6 +183,13 @@ export async function restoreConfigVersion(env: Env, id: string): Promise<boolea
 }
 
 export async function deleteConfigVersion(env: Env, id: string): Promise<boolean> {
+  if (hasDO(env)) {
+    try {
+      return await getDO(env).deleteVersion(id)
+    } catch (e) {
+      console.error('DO deleteVersion failed, falling back to KV:', e)
+    }
+  }
   const ns = kv(env)
   if (!ns) return false
   await ns.delete(`version:${id}`)
@@ -129,7 +202,19 @@ export async function deleteConfigVersion(env: Env, id: string): Promise<boolean
   return true
 }
 
+/* ─── Init ─── */
+
 export async function initConfigIfEmpty(env: Env): Promise<void> {
+  // DO 内部已包含 schema init；这里只做数据初始化
+  if (hasDO(env)) {
+    try {
+      const existing = await getDO(env).getConfig()
+      if (existing) return
+    } catch {
+      // DO 可能未就绪，继续尝试 KV
+    }
+  }
+
   const existing = await getConfig(env)
   if (existing) return
 

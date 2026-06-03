@@ -6,19 +6,20 @@ Sub Magic 是一个运行在 Cloudflare Workers 上的 Mihomo/Clash Meta 配置�
 
 ## 待实现/缺陷
 
-- [ ] 使用DurableObject实现更快的订阅同步响应
-	> 为了降低Cloudflare配置复杂度使用KV重复读取判断KV更新，现在的同步延迟约为15-30s甚至更高，后期看看用户使用反馈再考虑实现
+- [x] 使用 Durable Object 实现更快的订阅同步响应
+	> 已完成。配置主存储已迁移至 SQLite-backed Durable Object，提供强一致性读写与 WebSocket 实时推送。
 
 ## 功能概览
 
-- 订阅配置托管：完整配置保存在 Cloudflare KV，通过 `/sub/{key}` 输出 YAML 订阅。
-- Web 管理后台：基于密码登录，支持 SPA 管理界面。
+- 订阅配置托管：完整配置保存在 SQLite-backed Durable Object，通过 `/sub/{key}` 输出 YAML 订阅。
+- Web 管理后台：基于密码登录，支持 SPA 管理界面，多标签页实时同步。
 - 订阅源管理：管理 `proxy-providers`，支持增删改、UA 设置、健康检查字段、用量查询与刷新。
 - 代理组管理：管理 `proxy-groups`，支持 `select`、`url-test`、`fallback`、`load-balance`、`relay`，支持显式成员、`use` provider、`include-all` 系列与过滤项。
 - 规则管理：管理 `rules`，支持拖拽排序、常见规则类型、逻辑规则、`RULE-SET`、`SUB-RULE`、`MATCH` 等。
 - GeoSite / GeoIP 选择器：浏览器端解析 `geosite.dat` / `geoip.dat`，辅助回填规则。
 - YAML 文本编辑：直接编辑完整配置文本。
-- 历史版本管理：保存、查看、恢复、删除配置快照。
+- 历史版本管理：保存、查看、恢复、删除配置快照（DO SQLite 存储）。
+- 实时配置同步：WebSocket 长连接推送，任意客户端修改配置后，其他已登录标签页自动刷新。
 - 订阅 Key 管理：查看与轮换访问 Key。
 - 浏览器扩展：查看当前页面命中的路由链路，切换策略组 selector，控制默认代理与代理认证用户，执行 IpCheck，并快速新增/更新规则。
 
@@ -55,25 +56,28 @@ Sub Magic 是一个运行在 Cloudflare Workers 上的 Mihomo/Clash Meta 配置�
 ```text
 浏览器 / 浏览器扩展
         │
-        ▼
-Cloudflare Worker
-  ├─ 管理界面静态资源
-  ├─ API
-  └─ /sub/{key} 订阅输出
+        ├── WS /api/sync ───────────┐
+        ▼                           ▼
+Cloudflare Worker           ConfigSync Durable Object
+  ├─ 管理界面静态资源         ├─ config (SQLite)
+  ├─ API                      ├─ versions (SQLite)
+  └─ /sub/{key} 订阅输出      └─ WebSocket 广播
         │
         ▼
 Cloudflare KV
-  ├─ config
   ├─ subscription_key
   ├─ api_key_hash
+  ├─ password_hash
   ├─ session:*
-  └─ versions:*
+  └─ (config 与 versions 作为 fallback)
 ```
 
 ## 技术栈
 
 - Cloudflare Workers
-- Cloudflare KV
+- Cloudflare KV（认证、会话、Key）
+- **Cloudflare Durable Objects（SQLite-backed）** — 配置主存储与实时同步
+- WebSocket Hibernation API
 - 原生 ES Modules 前端
 - `yaml`
 - Vitest + `@cloudflare/vitest-pool-workers`
@@ -99,16 +103,16 @@ Cloudflare KV
 6. 输入构建命令`npm run build:extension`构建浏览器扩展
     > 若你需要安装签名的插件或在插件市场进行安装可以忽略这一步，或者你可以申请开发者并配置密钥进行签名构建
 7. 点击部署
-8. 点击左侧导航栏**存储和数据库**->**Workers KV**
-9. 点击**Create Isntance**
-10. 输入KV命名空间，如`SUB_MAGIC`
-11. 返回**计算**->**Worker 和 Pagges**
-12. 选择刚才部署的Worker
-13. 点击**绑定**
-14. 点击**添加绑定**
-15. 选择KV命名空间，然后点击添加绑定
-16. 输入变量名称`SUB_MAGIC`并选择刚才创建的命名空间，然后点击添加绑定
-17. 然后点击右上角访问即可
+8. **绑定 Durable Object**
+    - 在 Worker 详情页点击**绑定**
+    - 点击**添加绑定**，选择 **Durable Object**，变量名输入 `CONFIG_SYNC`，类名选择 `ConfigSync`
+    - 保存绑定（首次部署时 `wrangler.jsonc` 中的 `migrations` 会自动创建 SQLite-backed DO）
+9. **绑定 Workers KV**
+    - 点击左侧导航栏**存储和数据库**->**Workers KV**
+    - 点击**Create Instance**，输入KV命名空间，如`SUB_MAGIC`
+    - 返回 Worker 详情页，点击**绑定**->**添加绑定**
+    - 选择 KV 命名空间，变量名称输入 `SUB_MAGIC`，选择刚才创建的命名空间，保存
+10. 点击右上角访问即可
 
 ### 安装浏览器插件
 
@@ -190,12 +194,10 @@ https://your-worker.example.com/sub/{key}
 
 - 定时器固定每 `30s` 触发一次。
 - 更新脚本请求订阅时会携带 `If-None-Match` 和专用请求头 `X-Sub-Magic-Long-Poll: 1`。
-- Worker 仅对带该请求头的请求启用 KV 伪长轮询。
-- 当客户端 `ETag` 与当前配置一致时，Worker 会每 `3s` 检查一次 KV，最多检查 `10` 次，总等待约 `30s`。
-- 在等待期间如果检测到配置变化，会立即返回 `200` 和最新 YAML。
+- Worker 仅对带该请求头的请求启用 **Durable Object 强一致性长轮询**。
+- 当客户端 `ETag` 与当前配置一致时，DO 会每 `3s` 检查一次配置状态，最多检查 `10` 次，总等待约 `30s`。
+- 由于配置存储在 SQLite-backed DO 中，读取是强一致的，配置变更可被立即检测到并返回最新 YAML。
 - 如果等待结束仍无变化，则返回 `304`，客户端在下一次定时触发时继续请求。
-
-这种实现依赖 Cloudflare KV 读取来近似长轮询，适合个人使用场景；如果后续需要更稳定的“更新即返回”语义，可再迁移到 Durable Objects。
 
 ### Windows 自动更新
 
@@ -242,12 +244,14 @@ npm run build
 
 ```text
 src/
-  api.ts                Worker API
-  auth.ts               登录与会话
-  config.ts             KV 配置/版本管理
-  subscribe.ts          订阅输出
-  subscription-info.ts  订阅源用量查询
-  yaml.ts               配置与规则解析/序列化
+  api.ts                          Worker API
+  auth.ts                         登录与会话
+  config.ts                       配置/版本管理（DO 优先，KV fallback）
+  subscribe.ts                    订阅输出
+  subscription-info.ts            订阅源用量查询
+  yaml.ts                         配置与规则解析/序列化
+  durable-objects/
+    config-sync.ts                ConfigSync Durable Object（SQLite + WS）
 
 public/
   index.html
@@ -258,6 +262,7 @@ public/
     auth.js
     router.js
     state.js
+    sync.js                       WebSocket 实时同步客户端
     utils.js
     views/
     parsers/
@@ -275,6 +280,10 @@ browser-extension/
 - `POST /api/login`
 - `POST /api/logout`
 - `GET /api/check`
+
+实时同步（WebSocket）：
+
+- `GET /api/sync` — 建立 WebSocket 连接，接收 `config:updated` / `config:sync` 事件
 
 配置与订阅：
 

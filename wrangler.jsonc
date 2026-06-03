@@ -13,6 +13,9 @@
 	"assets": {
 		"directory": "./public"
 	},
+	"vars": {
+		"PASSWORD": "admin"
+	},
 	"observability": {
 		"enabled": true
 	},
@@ -22,10 +25,24 @@
 	 * Worker → Settings → Variables → KV Namespace Bindings
 	 * 添加变量名 SUB_MAGIC 并选择对应的 KV 命名空间即可。
 	 *
-	 * 如需本地开发调试，可参考下方取消注释：
+	 * 如需本地开发调试，可参考下方取消注释（wrangler dev 会自动创建本地 KV）：
 	 */
 //	 "kv_namespaces": [
-//	   { "binding": "SUB_MAGIC", "id": "" }
+//	   { "binding": "SUB_MAGIC", "id": "local-dev-kv-0000000000000000" }
 //	 ],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "CONFIG_SYNC",
+				"class_name": "ConfigSync"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["ConfigSync"]
+		}
+	],
 	"upload_source_maps": true
 }

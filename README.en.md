@@ -6,19 +6,20 @@ Sub Magic is a Mihomo/Clash Meta configuration management tool built on Cloudfla
 
 ## Planned / Known Issues
 
-- [ ] Use Durable Objects to provide faster subscription sync responses
-  > To keep the Cloudflare setup simpler, the project currently relies on repeated KV reads to detect updates. In practice, sync latency is about 15-30 seconds and can be higher. This may be revisited later depending on user feedback.
+- [x] Use Durable Objects to provide faster subscription sync responses
+  > Completed. Configuration storage has been migrated to a SQLite-backed Durable Object, providing strongly-consistent reads/writes and WebSocket real-time push.
 
 ## Features
 
-- Subscription hosting: the full configuration is stored in Cloudflare KV and exposed as a YAML subscription via `/sub/{key}`.
-- Web admin panel: password-based login with an SPA management interface.
+- Subscription hosting: the full configuration is stored in a SQLite-backed Durable Object and exposed as a YAML subscription via `/sub/{key}`.
+- Web admin panel: password-based login with an SPA management interface, with multi-tab real-time sync.
 - Subscription source management: manage `proxy-providers` with create/update/delete, UA settings, health check fields, usage queries, and refresh support.
 - Proxy group management: manage `proxy-groups`, including `select`, `url-test`, `fallback`, `load-balance`, and `relay`, with explicit members, provider-based `use`, `include-all` variants, and filters.
 - Rule management: manage `rules` with drag-and-drop sorting and support for common rule types, logical rules, `RULE-SET`, `SUB-RULE`, `MATCH`, and more.
 - GeoSite / GeoIP selectors: parse `geosite.dat` and `geoip.dat` in the browser to help fill rule targets.
 - YAML text editing: edit the full configuration directly.
-- Version history: save, inspect, restore, and delete configuration snapshots.
+- Version history: save, inspect, restore, and delete configuration snapshots (DO SQLite storage).
+- Real-time config sync: WebSocket long-lived connection push; after any client modifies the configuration, all other logged-in tabs auto-refresh.
 - Subscription key management: view and rotate access keys.
 - Browser extension: inspect the current page's matched routing path, switch selector groups, control default proxy and auth user, run IP checks, and quickly add or update rules.
 
@@ -55,25 +56,28 @@ Sub Magic is a Mihomo/Clash Meta configuration management tool built on Cloudfla
 ```text
 Browser / Browser Extension
         |
-        v
-Cloudflare Worker
-  |- Static admin assets
-  |- API
-  `- /sub/{key} subscription output
+        |-- WS /api/sync ---------------|
+        v                               v
+Cloudflare Worker           ConfigSync Durable Object
+  |- Static admin assets     |- config (SQLite)
+  |- API                     |- versions (SQLite)
+  `- /sub/{key} output       `- WebSocket broadcast
         |
         v
 Cloudflare KV
-  |- config
   |- subscription_key
   |- api_key_hash
+  |- password_hash
   |- session:*
-  `- versions:*
+  `- (config and versions as fallback)
 ```
 
 ## Tech Stack
 
 - Cloudflare Workers
-- Cloudflare KV
+- Cloudflare KV (auth, sessions, keys)
+- **Cloudflare Durable Objects (SQLite-backed)** — primary config storage and real-time sync
+- WebSocket Hibernation API
 - Native ES Modules frontend
 - `yaml`
 - Vitest + `@cloudflare/vitest-pool-workers`
@@ -100,16 +104,16 @@ Click the **Fork** button at the top of the [GitHub](https://github.com/bit8192/
 6. Enter the build command `npm run build:extension` to build the browser extension.
    > If you only plan to install a signed extension or publish it through an extension store, you can skip this step. You can also apply for a developer account and configure signing keys for signed builds.
 7. Deploy the project.
-8. In the left sidebar, go to **Storage & Databases** -> **Workers KV**.
-9. Click **Create instance**.
-10. Create a KV namespace such as `SUB_MAGIC`.
-11. Return to **Compute** -> **Workers and Pages**.
-12. Open the Worker you just deployed.
-13. Click **Bindings**.
-14. Click **Add binding**.
-15. Choose a KV namespace binding.
-16. Set the variable name to `SUB_MAGIC`, select the namespace you just created, and save it.
-17. Open the Worker URL from the top-right corner.
+8. **Bind Durable Object**
+   - On the Worker detail page, click **Bindings**.
+   - Click **Add binding**, select **Durable Object**, enter variable name `CONFIG_SYNC`, and select class name `ConfigSync`.
+   - Save the binding (the `migrations` in `wrangler.jsonc` will automatically create the SQLite-backed DO on first deploy).
+9. **Bind Workers KV**
+   - In the left sidebar, go to **Storage & Databases** -> **Workers KV**.
+   - Click **Create instance**, enter a KV namespace name such as `SUB_MAGIC`.
+   - Return to the Worker detail page, click **Bindings** -> **Add binding**.
+   - Choose a KV namespace binding, set the variable name to `SUB_MAGIC`, select the namespace you just created, and save it.
+10. Open the Worker URL from the top-right corner.
 
 ### Install the Browser Extension
 
@@ -190,12 +194,10 @@ The home page provides a Linux install command that sets up a user-level systemd
 
 - The timer runs every `30s`.
 - The update script sends `If-None-Match` and the dedicated header `X-Sub-Magic-Long-Poll: 1`.
-- The Worker only enables KV-based pseudo long-polling for requests with that header.
-- When the client's `ETag` matches the current config, the Worker checks KV every `3s` for up to `10` times, for a total wait of about `30s`.
-- If a config change is detected during the wait, it returns `200` with the latest YAML immediately.
+- The Worker only enables **Durable Object strongly-consistent long-polling** for requests with that header.
+- When the client's `ETag` matches the current config, the DO checks the config state every `3s` for up to `10` times, for a total wait of about `30s`.
+- Because configuration is stored in a SQLite-backed DO, reads are strongly consistent and configuration changes can be detected immediately, returning the latest YAML right away.
 - If nothing changes before the wait ends, it returns `304`, and the client retries on the next timer tick.
-
-This approach approximates long-polling using Cloudflare KV reads and is suitable for personal use. If you later need stronger "return immediately on change" semantics, you can move that part to Durable Objects.
 
 ### Windows Auto Update
 
@@ -242,12 +244,14 @@ For Firefox signing, see [browser-extension/.env.example](./browser-extension/.e
 
 ```text
 src/
-  api.ts                Worker API
-  auth.ts               Login and session
-  config.ts             KV config and version management
-  subscribe.ts          Subscription output
-  subscription-info.ts  Subscription usage lookup
-  yaml.ts               Config and rule parsing/serialization
+  api.ts                          Worker API
+  auth.ts                         Login and session
+  config.ts                       Config and version management (DO primary, KV fallback)
+  subscribe.ts                    Subscription output
+  subscription-info.ts            Subscription usage lookup
+  yaml.ts                         Config and rule parsing/serialization
+  durable-objects/
+    config-sync.ts                ConfigSync Durable Object (SQLite + WS)
 
 public/
   index.html
@@ -258,6 +262,7 @@ public/
     auth.js
     router.js
     state.js
+    sync.js                         WebSocket real-time sync client
     utils.js
     views/
     parsers/
@@ -275,6 +280,10 @@ Authentication and session:
 - `POST /api/login`
 - `POST /api/logout`
 - `GET /api/check`
+
+Real-time sync (WebSocket):
+
+- `GET /api/sync` — establish WebSocket connection, receive `config:updated` / `config:sync` events
 
 Configuration and subscription:
 

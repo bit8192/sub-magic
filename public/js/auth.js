@@ -1,7 +1,9 @@
 import { API } from './api.js'
 
 let _onLoggedIn = () => {}
+let _onLoggedOut = () => {}
 export function onLoggedIn(fn) { _onLoggedIn = fn }
+export function onLoggedOut(fn) { _onLoggedOut = fn }
 
 async function fetchPasswordStatus() {
   const res = await fetch('/api/password-status')
@@ -107,5 +109,6 @@ export async function checkAuth() {
 
 export async function doLogout() {
   await API.post('/api/logout')
+  _onLoggedOut()
   renderLogin()
 }

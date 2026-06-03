@@ -716,8 +716,8 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
   }
 
   if (path.startsWith('/api/config/versions/') && method === 'POST') {
-    const id = decodeURIComponent(path.slice('/api/config/versions/'.length))
     if (path.endsWith('/restore')) {
+      const id = decodeURIComponent(path.slice('/api/config/versions/'.length, -'/restore'.length))
       const ok = await restoreConfigVersion(env, id)
       if (!ok) return json({ error: 'Version not found' }, 404)
       return json({ ok: true })

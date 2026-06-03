@@ -38,7 +38,7 @@ export async function verifyPassword(env: Env, password: string): Promise<boolea
   if (storedHash) {
     return timingSafeEqual(storedHash, await sha256Hex(password))
   }
-  const stored = env.PASSWORD
+  const stored = (env as any).PASSWORD
   if (!stored) return false
   return timingSafeEqual(stored, password)
 }
