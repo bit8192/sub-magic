@@ -653,6 +653,18 @@ function buildFirefoxProxyInfo(profile, tabId) {
 		info.proxyDNS = true
 	}
 
+	if (profile.proxyType === 'https' && profile.authUser) {
+		try {
+			const { username, password } = profile.authUser
+			const encoder = new TextEncoder()
+			const data = encoder.encode(`${username}:${password}`)
+			const binary = Array.from(data).map((b) => String.fromCharCode(b)).join('')
+			info.proxyAuthorizationHeader = `Basic ${btoa(binary)}`
+		} catch {
+			// ignore encoding errors
+		}
+	}
+
 	return info
 }
 

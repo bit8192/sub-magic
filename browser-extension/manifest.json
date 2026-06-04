@@ -12,7 +12,7 @@
 			}
 		}
 	},
-	"permissions": ["storage", "activeTab", "tabs", "webRequest", "proxy"],
+	"permissions": ["storage", "activeTab", "tabs", "webRequest", "webRequestBlocking", "proxy"],
 	"host_permissions": ["<all_urls>"],
 	"icons": {
 		"16": "icons/icon.svg",

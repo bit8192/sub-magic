@@ -129,7 +129,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 	document.getElementById('geo-suggestion-box').addEventListener('click', handleGeoSuggestionClick)
 	document.getElementById('proxy-port').addEventListener('change', () => refreshProxyForm())
 	document.getElementById('proxy-type').addEventListener('change', () => refreshProxyForm())
-	document.getElementById('proxy-auth-user').addEventListener('change', () => refreshProxyMeta())
+	document.getElementById('proxy-auth-user').addEventListener('change', () => {
+		refreshProxyAuthUserAvailability(getSelectedProxyType())
+		refreshProxyMeta()
+	})
 	document.getElementById('rule-priority-select').addEventListener('change', updateRulePriorityHint)
 
 	const proxySelect = document.getElementById('rule-proxy-select')
@@ -352,6 +355,31 @@ function refreshProxyAuthUserAvailability(proxyType) {
 		select.value = ''
 		hint.textContent = 'Chrome 中选择 SOCKS4/SOCKS5 时，不支持代理认证用户。'
 		return
+	}
+
+	if (select.value) {
+		const configs = state.mihomoConfigs || {}
+		const hasAuth = Array.isArray(configs.authentication) && configs.authentication.length > 0
+		const skipPrefixes = Array.isArray(configs['skip-auth-prefixes']) ? configs['skip-auth-prefixes'] : null
+
+		// skip-auth-prefixes 未配置时，mihomo 内部默认包含 127.0.0.1/8 和 ::1/128
+		const skipsLocal = skipPrefixes === null || skipPrefixes.some((p) => {
+			const s = String(p)
+			return s.startsWith('127.') || s === '::1/128'
+		})
+
+		if (!hasAuth && skipsLocal) {
+			hint.textContent = '当前 Mihomo 未配置 authentication，且默认允许 127.0.0.1/8 跳过认证（skip-auth-prefixes），代理认证不会生效。'
+			return
+		}
+		if (!hasAuth) {
+			hint.textContent = '当前 Mihomo 未配置 authentication，代理认证不会生效。'
+			return
+		}
+		if (skipsLocal) {
+			hint.textContent = '代理认证可能失效：Mihomo 默认允许 127.0.0.1/8 跳过认证（skip-auth-prefixes），本机连接可能无需凭证。'
+			return
+		}
 	}
 
 	hint.textContent = ''
@@ -1428,9 +1456,33 @@ function getIpCheckUncoveredRedirectDomains(entry) {
 }
 
 function getIpCheckBaseProfile() {
+	const host = getMihomoHost()
+	if (!host) {
+		throw new Error('无法从 Mihomo API 地址解析代理 host')
+	}
+
+	if (state.browser.id === 'firefox') {
+		const socks5Option = state.proxyPortOptions.find((option) => option.supportedTypes.includes('socks5'))
+		if (!socks5Option) {
+			throw new Error('IpCheck 需要 SOCKS5 代理端口，请在 Mihomo 配置中开启 socks-port 或 mixed-port')
+		}
+		if (Number(socks5Option.port) <= 0) {
+			throw new Error('SOCKS5 代理端口无效')
+		}
+		return {
+			enabled: true,
+			proxyType: 'socks5',
+			host,
+			port: Number(socks5Option.port),
+			listenerName: socks5Option.listenerName || '',
+			source: socks5Option.source,
+			authUser: { username: IPCHECK_USERNAME, password: IPCHECK_DEFAULT_PASSWORD },
+		}
+	}
+
 	const draftProfile = {
 		proxyType: getSelectedProxyType() || state.proxyProfile?.proxyType || DEFAULT_PROXY_TYPE,
-		host: getMihomoHost(),
+		host,
 		port: 0,
 		listenerName: getSelectedPortOption()?.listenerName || state.proxyProfile?.listenerName || '',
 		source: getSelectedPortOption()?.source || state.proxyProfile?.source || 'config',

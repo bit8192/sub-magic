@@ -5,10 +5,23 @@ export function normalizeListenerPort(port) {
 	return Number.isFinite(value) ? value : 0
 }
 
-export function getSupportedProxyTypesForListenerType(listenerType) {
+function listenerHasTls(listener) {
+	return !!(
+		listener?.tls ||
+		listener?.['private-key'] ||
+		listener?.certificate ||
+		listener?.['ca-str']
+	)
+}
+
+export function getSupportedProxyTypesForListenerType(listenerType, listener = null) {
 	const type = String(listenerType || '').trim().toLowerCase()
-	if (type === 'http') return ['http', 'https']
-	if (type === 'mixed') return ['http', 'https', 'socks5']
+	if (type === 'http') {
+		return listenerHasTls(listener) ? ['http', 'https'] : ['http']
+	}
+	if (type === 'mixed') {
+		return listenerHasTls(listener) ? ['http', 'https', 'socks5'] : ['http', 'socks5']
+	}
 	if (type === 'socks') return ['socks4', 'socks5']
 	return []
 }
@@ -49,15 +62,15 @@ export function buildAvailableProxyPortOptions(configs, listeners) {
 		})
 	}
 
-	addConfigOption('port', configs?.port, ['http', 'https'])
+	addConfigOption('port', configs?.port, ['http'])
 	addConfigOption('socks-port', configs?.['socks-port'], ['socks4', 'socks5'])
-	addConfigOption('mixed-port', configs?.['mixed-port'], ['http', 'https', 'socks5'])
+	addConfigOption('mixed-port', configs?.['mixed-port'], ['http', 'socks5'])
 
 	for (const listener of Array.isArray(listeners) ? listeners : []) {
 		const listenerName = String(listener?.name || '').trim()
 		const listenerType = String(listener?.type || '').trim().toLowerCase()
 		const port = normalizeListenerPort(listener?.port)
-		const supportedTypes = getSupportedProxyTypesForListenerType(listenerType)
+		const supportedTypes = getSupportedProxyTypesForListenerType(listenerType, listener)
 		if (!listenerName || port <= 0 || supportedTypes.length === 0) continue
 		addOption({
 			id: `listener:${listenerName}`,
