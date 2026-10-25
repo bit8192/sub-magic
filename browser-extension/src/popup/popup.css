@@ -836,6 +836,52 @@ body {
 	color: var(--text-muted);
 }
 
+.selector-right {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+	gap: 4px;
+	min-width: 62px;
+}
+
+.selector-ipcheck-badge {
+	display: inline-block;
+	padding: 2px 8px;
+	border-radius: 999px;
+	font-size: 10px;
+	font-weight: 600;
+	cursor: pointer;
+	white-space: nowrap;
+	background: var(--surface-3);
+	color: var(--text-muted);
+	border: 1px solid var(--border);
+	transition: background var(--transition), color var(--transition);
+}
+
+.selector-ipcheck-badge:hover {
+	background: var(--primary);
+	color: #fff;
+	border-color: var(--primary);
+}
+
+.selector-ipcheck-badge.probing {
+	background: rgba(0, 212, 255, 0.14);
+	color: var(--primary);
+	cursor: default;
+}
+
+.selector-ipcheck-badge.success {
+	background: rgba(0, 255, 136, 0.14);
+	color: var(--success);
+	cursor: default;
+}
+
+.selector-ipcheck-badge.error {
+	background: rgba(255, 51, 102, 0.14);
+	color: var(--danger);
+	cursor: default;
+}
+
 .footer {
 	display: flex;
 	justify-content: space-between;

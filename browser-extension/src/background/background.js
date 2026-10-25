@@ -17,7 +17,7 @@ let cachedSnapshots = []
 const SNAPSHOT_TTL = 30000
 
 let proxyGroups = []
-let ipCheckRunning = false
+let ipCheckQueue = Promise.resolve()
 
 const tabRequests = new Map()
 const routingPanelCache = new Map()
@@ -27,11 +27,21 @@ const MAX_REQUESTS_PER_TAB = 200
 const SHARED_SCORE_DELTA = 12
 const WINNING_SCORE_DELTA = 8
 
+const AVAILABILITY_CACHE_TTL = 5000
+const AVAILABILITY_CHECK_TIMEOUT = 2500
+const AVAILABILITY_WATCH_INTERVAL = 10000
+
 const proxyState = {
 	isolationEnabled: supportsIsolation,
 	globalProfile: createDefaultProxyProfile(),
 	tabProfiles: {},
+	availability: { status: 'idle', reason: '', checkedAt: 0 },
 }
+
+let availabilityCheckPromise = null
+let availabilityWatchdogTimer = null
+// IpCheck 等临时代理任务期间，可用性门控不回退 direct，让探测请求按预期失败而不是悄悄走直连
+let activeTemporaryTask = false
 
 function createDefaultProxyProfile() {
 	return {
@@ -99,6 +109,7 @@ function serializeProxyState(tabId = 0) {
 		browser: getBrowserInfo(),
 		isolationEnabled: proxyState.isolationEnabled,
 		profile: getEffectiveProfile(tabId),
+		availability: { ...proxyState.availability },
 	}
 }
 
@@ -168,7 +179,7 @@ async function bootstrapProxyProfileFromMihomo(profile) {
 	}
 
 	try {
-		const configs = await mihomoFetch(config.url, config.secret, '/configs')
+		const configs = await mihomoFetch(config.url, config.secret, '/configs', { timeoutMs: 5000 })
 		const host = getMihomoHost()
 		const port = resolveConfigPortForType(normalized, configs || {})
 		if (!host || port <= 0) return normalized
@@ -214,9 +225,94 @@ async function bootstrapProxyState() {
 	await applyProxySettings()
 }
 
+/**
+ * 可用性检查：请求 Mihomo API /version，判定代理端口背后的大致存活状态。
+ * 结果带 5s 缓存；未配置 Mihomo API 时返回 unknown（无法校验，维持旧行为）。
+ */
+async function checkProxyAvailability(force = false) {
+	if (!config.url) {
+		proxyState.availability = {
+			status: 'unknown',
+			reason: '未配置 Mihomo API，无法校验代理可用性',
+			checkedAt: Date.now(),
+		}
+		return proxyState.availability
+	}
+
+	const now = Date.now()
+	if (
+		!force &&
+		now - proxyState.availability.checkedAt < AVAILABILITY_CACHE_TTL &&
+		proxyState.availability.status !== 'checking'
+	) {
+		return proxyState.availability
+	}
+	if (availabilityCheckPromise) return availabilityCheckPromise
+
+	proxyState.availability = { status: 'checking', reason: '', checkedAt: now }
+	availabilityCheckPromise = (async () => {
+		try {
+			await mihomoFetch(config.url, config.secret, '/version', {
+				timeoutMs: AVAILABILITY_CHECK_TIMEOUT,
+			})
+			proxyState.availability = { status: 'available', reason: '', checkedAt: Date.now() }
+		} catch (error) {
+			// mihomoFetch 已把超时（AbortError）转换为「请求超时」文案
+			const reason = error?.message || 'Mihomo API 请求失败'
+			proxyState.availability = { status: 'unavailable', reason, checkedAt: Date.now() }
+		} finally {
+			availabilityCheckPromise = null
+		}
+		return proxyState.availability
+	})()
+	return availabilityCheckPromise
+}
+
+function isProxyAllowedForRouting() {
+	if (activeTemporaryTask) return true
+	const status = proxyState.availability.status
+	// unknown：未配置 Mihomo API，无从校验，按用户显式配置执行
+	return status === 'available' || status === 'unknown'
+}
+
+function hasApplicableProfile() {
+	if (canApplyProfile(proxyState.globalProfile)) return true
+	return Object.values(proxyState.tabProfiles).some(canApplyProfile)
+}
+
+function stopAvailabilityWatchdog() {
+	if (availabilityWatchdogTimer) clearInterval(availabilityWatchdogTimer)
+	availabilityWatchdogTimer = null
+}
+
+/** 代理启用期间周期性复查：Mihomo 挂掉自动回退 direct，恢复后自动重新接管 */
+function ensureAvailabilityWatchdog() {
+	if (!hasApplicableProfile()) {
+		stopAvailabilityWatchdog()
+		return
+	}
+	if (availabilityWatchdogTimer) return
+	availabilityWatchdogTimer = setInterval(() => {
+		checkProxyAvailability(true)
+			.then(() => {
+				if (!activeTemporaryTask) {
+					applyProxySettings({ skipAvailabilityCheck: true }).catch(() => {})
+				}
+			})
+			.catch(() => {})
+	}, AVAILABILITY_WATCH_INTERVAL)
+}
+
 function buildChromeProxyConfig(profile) {
 	if (!canApplyProfile(profile)) {
 		return { mode: 'direct' }
+	}
+
+	// 本机与 Mihomo 控制器地址始终直连：控制面请求不能依赖数据面代理存活
+	const bypassList = ['localhost', '127.0.0.1', '[::1]']
+	const controllerHost = getMihomoHost()
+	if (controllerHost && !bypassList.includes(controllerHost)) {
+		bypassList.push(controllerHost)
 	}
 
 	return {
@@ -227,28 +323,51 @@ function buildChromeProxyConfig(profile) {
 				host: profile.host,
 				port: Number(profile.port),
 			},
+			bypassList,
 		},
 	}
 }
 
-async function applyProxySettings() {
-	if (isFirefox || !chrome.proxy?.settings?.set) return
+async function applyProxySettings(options = {}) {
 	const profile = normalizeProfile(proxyState.globalProfile)
-	await chrome.proxy.settings.set({
-		value: buildChromeProxyConfig(profile),
-		scope: 'regular',
-	})
+
+	if (!canApplyProfile(profile)) {
+		if (!isFirefox && chrome.proxy?.settings?.set) {
+			await chrome.proxy.settings.set({
+				value: { mode: 'direct' },
+				scope: 'regular',
+			})
+		}
+		ensureAvailabilityWatchdog()
+		return
+	}
+
+	// Firefox 没有 chrome.proxy.settings，检查只为维护可用性状态与 watchdog
+	if (!options.skipAvailabilityCheck) {
+		await checkProxyAvailability()
+	}
+
+	if (!isFirefox && chrome.proxy?.settings?.set) {
+		await chrome.proxy.settings.set({
+			value: isProxyAllowedForRouting() ? buildChromeProxyConfig(profile) : { mode: 'direct' },
+			scope: 'regular',
+		})
+	}
+	ensureAvailabilityWatchdog()
 }
 
 async function applyTemporaryGlobalProfile(profile, task) {
 	const previousProfile = normalizeProfile(proxyState.globalProfile)
 	proxyState.globalProfile = normalizeProfile(profile)
-	await applyProxySettings()
+	activeTemporaryTask = true
+	// 跳过门控：临时任务（IpCheck）的存活校验由调用方完成，且必须真正应用才能测到代理出口
+	await applyProxySettings({ skipAvailabilityCheck: true })
 
 	try {
 		return await task()
 	} finally {
 		proxyState.globalProfile = previousProfile
+		activeTemporaryTask = false
 		await applyProxySettings()
 	}
 }
@@ -554,11 +673,7 @@ async function probeReferenceDatabases() {
 	}
 }
 
-async function runIpCheckProbe(payload) {
-	if (ipCheckRunning) {
-		throw new Error('已有检测任务正在执行，请稍后重试')
-	}
-
+async function runIpCheckProbeInternal(payload) {
 	const baseProfile = normalizeProfile(payload?.profile)
 	if (!canApplyProfile(baseProfile)) {
 		throw new Error('当前代理配置不可用，请先启用可用的 Mihomo 代理端口')
@@ -569,64 +684,74 @@ async function runIpCheckProbe(payload) {
 		throw new Error('IpCheck 代理认证用户无效')
 	}
 
+	// 强制新鲜校验：Mihomo 不可用时直接失败，避免探测流量悄悄改走直连给出假结果
+	const availability = await checkProxyAvailability(true)
+	if (availability.status === 'unavailable') {
+		throw new Error(`Mihomo 不可用，IpCheck 已终止: ${availability.reason}`)
+	}
+
 	const probeProfile = normalizeProfile({
 		...baseProfile,
 		enabled: true,
 		authUser,
 	})
 
-	ipCheckRunning = true
-	try {
-		return await applyTemporaryGlobalProfile(probeProfile, async () => {
-			const [qualityRes, geoRes, serviceRes, refsRes] = await Promise.allSettled([
-				fetchJsonWithTimeout('https://api.ipapi.is'),
-				fetchJsonWithTimeout('https://api.ip.sb/geoip'),
-				probeServiceMatrix(),
-				probeReferenceDatabases(),
-			])
+	return await applyTemporaryGlobalProfile(probeProfile, async () => {
+		const [qualityRes, geoRes, serviceRes, refsRes] = await Promise.allSettled([
+			fetchJsonWithTimeout('https://api.ipapi.is'),
+			fetchJsonWithTimeout('https://api.ip.sb/geoip'),
+			probeServiceMatrix(),
+			probeReferenceDatabases(),
+		])
 
-			const quality = qualityRes.status === 'fulfilled' ? qualityRes.value : null
-			const geo = geoRes.status === 'fulfilled' ? geoRes.value : null
-			const services = serviceRes.status === 'fulfilled' ? serviceRes.value : null
-			const references = refsRes.status === 'fulfilled' ? refsRes.value : null
-			if (!quality && !geo) {
-				const firstError = qualityRes.status === 'rejected' ? qualityRes.reason : geoRes.reason
-				throw new Error(firstError?.message || 'IP 检测失败')
-			}
+		const quality = qualityRes.status === 'fulfilled' ? qualityRes.value : null
+		const geo = geoRes.status === 'fulfilled' ? geoRes.value : null
+		const services = serviceRes.status === 'fulfilled' ? serviceRes.value : null
+		const references = refsRes.status === 'fulfilled' ? refsRes.value : null
+		if (!quality && !geo) {
+			const firstError = qualityRes.status === 'rejected' ? qualityRes.reason : geoRes.reason
+			throw new Error(firstError?.message || 'IP 检测失败')
+		}
 
-			const ip = quality?.ip || geo?.ip || ''
-			const country = quality?.location?.country || geo?.country || ''
-			const countryCode = quality?.location?.country_code || geo?.country_code || ''
-			const city = quality?.location?.city || geo?.city || ''
-			const asn = quality?.company?.asn || geo?.asn || ''
-			const isp = quality?.company?.name || geo?.isp || geo?.organization || ''
-			const summary = quality ? buildIpCheckSummary(quality) : { risk: '未知', tags: [] }
-			const details = buildIpCheckDetails(quality || {}, geo || {})
+		const ip = quality?.ip || geo?.ip || ''
+		const country = quality?.location?.country || geo?.country || ''
+		const countryCode = quality?.location?.country_code || geo?.country_code || ''
+		const city = quality?.location?.city || geo?.city || ''
+		const asn = quality?.company?.asn || geo?.asn || ''
+		const isp = quality?.company?.name || geo?.isp || geo?.organization || ''
+		const summary = quality ? buildIpCheckSummary(quality) : { risk: '未知', tags: [] }
+		const details = buildIpCheckDetails(quality || {}, geo || {})
 
-			return {
-				ok: true,
-				ip,
-				country,
-				countryCode,
-				city,
-				asn,
-				isp,
-				risk: summary.risk,
-				tags: summary.tags,
-				details,
-				services,
-				references,
-				raw: {
-					quality,
-					geo,
-					services: services?.raw || null,
-					references: references?.raw || null,
-				},
-			}
-		})
-	} finally {
-		ipCheckRunning = false
-	}
+		return {
+			ok: true,
+			ip,
+			country,
+			countryCode,
+			city,
+			asn,
+			isp,
+			risk: summary.risk,
+			tags: summary.tags,
+			details,
+			services,
+			references,
+			raw: {
+				quality,
+				geo,
+				services: services?.raw || null,
+				references: references?.raw || null,
+			},
+		}
+	})
+}
+
+function runIpCheckProbe(payload) {
+	const taskPromise = ipCheckQueue.then(
+		() => runIpCheckProbeInternal(payload),
+		() => runIpCheckProbeInternal(payload),
+	)
+	ipCheckQueue = taskPromise.catch(() => {})
+	return taskPromise
 }
 
 function buildFirefoxProxyInfo(profile, tabId) {
@@ -668,9 +793,47 @@ function buildFirefoxProxyInfo(profile, tabId) {
 	return info
 }
 
+function isLoopbackHost(hostname) {
+	const host = String(hostname || '').toLowerCase()
+	return host === 'localhost' || host === '::1' || host === '[::1]' || host === '0.0.0.0' || host.startsWith('127.')
+}
+
+function getControllerOrigin() {
+	try {
+		return new URL(ensureHttpUrl(config.url)).origin
+	} catch {
+		return ''
+	}
+}
+
 function handleFirefoxProxyRequest(requestInfo) {
-	const profile = getEffectiveProfile(requestInfo.tabId || 0)
-	return buildFirefoxProxyInfo(profile, requestInfo.tabId || 0)
+	const tabId = requestInfo.tabId || 0
+	const profile = getEffectiveProfile(tabId)
+	if (!canApplyProfile(profile)) {
+		return { type: 'direct' }
+	}
+
+	// 控制面（Mihomo API）与本机回环流量永远直连，代理挂掉时自身仍可自愈
+	let requestUrl = ''
+	try {
+		requestUrl = new URL(requestInfo.url || '')
+	} catch {
+		requestUrl = null
+	}
+	if (requestUrl) {
+		const controllerOrigin = getControllerOrigin()
+		if (controllerOrigin && requestUrl.origin === controllerOrigin) {
+			return { type: 'direct' }
+		}
+		if (isLoopbackHost(requestUrl.hostname)) {
+			return { type: 'direct' }
+		}
+	}
+
+	if (!isProxyAllowedForRouting()) {
+		return { type: 'direct' }
+	}
+	return buildFirefoxProxyInfo(profile, tabId)
 }
 
 function resolveProxyAuthCredentials(details) {
@@ -937,12 +1100,32 @@ async function mihomoFetch(url, secret, path, options = {}) {
 	baseUrl = baseUrl.replace(/\/+$/, '')
 	const headers = { ...options.headers }
 	if (secret) headers.Authorization = `Bearer ${secret}`
-	const res = await fetch(`${baseUrl}${path}`, { ...options, headers })
-	if (!res.ok) {
-		const text = await res.text()
-		throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`)
+
+	const fetchOptions = { ...options, headers }
+	delete fetchOptions.timeoutMs
+
+	let timer = null
+	if (options.timeoutMs) {
+		const controller = new AbortController()
+		timer = setTimeout(() => controller.abort(), options.timeoutMs)
+		fetchOptions.signal = controller.signal
 	}
-	return res.json()
+
+	try {
+		const res = await fetch(`${baseUrl}${path}`, fetchOptions)
+		if (!res.ok) {
+			const text = await res.text()
+			throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`)
+		}
+		return res.json()
+	} catch (error) {
+		if (error?.name === 'AbortError') {
+			throw new Error(`请求超时（${options.timeoutMs}ms）: ${baseUrl}${path}`)
+		}
+		throw error
+	} finally {
+		if (timer) clearTimeout(timer)
+	}
 }
 
 function addSnapshot(data) {
@@ -1318,13 +1501,16 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.storage.onChanged.addListener((changes, area) => {
 	if (area === 'sync' && (changes.mihomoUrl || changes.mihomoSecret)) {
-		loadConfig().then(() => {
+		loadConfig().then(async () => {
+			// API 地址变更后旧缓存结论作废，强制重查再决定是否接管代理
+			await checkProxyAvailability(true).catch(() => {})
 			if (config.url) {
-				bootstrapProxyState().catch(() => {})
+				await bootstrapProxyState().catch(() => {})
 				initMonitor()
 			} else {
 				stopPolling()
 			}
+			await applyProxySettings().catch(() => {})
 		})
 	}
 

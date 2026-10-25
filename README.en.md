@@ -17,11 +17,13 @@ Sub Magic is a Mihomo/Clash Meta configuration management tool built on Cloudfla
 - Proxy group management: manage `proxy-groups`, including `select`, `url-test`, `fallback`, `load-balance`, and `relay`, with explicit members, provider-based `use`, `include-all` variants, and filters.
 - Rule management: manage `rules` with drag-and-drop sorting and support for common rule types, logical rules, `RULE-SET`, `SUB-RULE`, `MATCH`, and more.
 - GeoSite / GeoIP selectors: parse `geosite.dat` and `geoip.dat` in the browser to help fill rule targets.
-- YAML text editing: edit the full configuration directly.
+- YAML text editing: edit the full configuration directly; the text is stored exactly as written (comments, anchors, indentation, and quote style are untouched).
+- Hand-written config fidelity: comments and YAML anchors (`&name` / `*name` / `<<: *name`) survive structured edits to rules, groups, providers, and listeners, and only the lines that actually changed are rewritten.
 - Version history: save, inspect, restore, and delete configuration snapshots (DO SQLite storage).
 - Real-time config sync: WebSocket long-lived connection push; after any client modifies the configuration, all other logged-in tabs auto-refresh.
 - Subscription key management: view and rotate access keys.
 - Browser extension: inspect the current page's matched routing path, switch selector groups, control default proxy and auth user, run IP checks, and quickly add or update rules.
+- Proxy availability guard: the extension verifies the Mihomo API is reachable before taking over the browser proxy, falls back to a direct connection while it is down, and re-takes-over automatically once it recovers; Mihomo API and loopback traffic always bypass the proxy so the control plane can heal itself.
 
 ## Admin Panel
 

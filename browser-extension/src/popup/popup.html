@@ -16,7 +16,7 @@
 			<button id="btn-toggle-proxy-panel" class="section-toggle" title="收起或展开代理控制">
 				<span>代理控制</span>
 				<span class="section-toggle-meta">
-					<span id="proxy-status" class="routing-status loading">不可用</span>
+					<span id="proxy-status" class="routing-status loading">加载中...</span>
 					<span id="proxy-toggle-icon" class="section-toggle-icon">&#9662;</span>
 				</span>
 			</button>
@@ -46,7 +46,7 @@
 			</div>
 			<div class="proxy-meta" id="proxy-meta"></div>
 			<div class="form-actions">
-				<button id="btn-apply-proxy" class="btn btn-secondary" disabled>不可用</button>
+				<button id="btn-apply-proxy" class="btn btn-secondary" disabled>加载中</button>
 			</div>
 		</div>
 	</div>
@@ -123,6 +123,7 @@
 		<div class="section-title" style="gap:8px">
 			<button id="btn-back-selector" class="btn-icon" title="返回路由链路">&#8592;</button>
 			<span id="selector-panel-title">代理链路</span>
+			<button id="btn-batch-selector-ipcheck" class="btn btn-secondary btn-sm" style="margin-left:auto;font-size:11px;padding:2px 8px;">批量检测</button>
 		</div>
 		<div id="selector-meta" class="selector-meta"></div>
 		<div id="selector-result" class="selector-result"></div>

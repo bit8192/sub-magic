@@ -40,6 +40,7 @@ Sub Magic 是一个运行在 Cloudflare Workers 上的 Mihomo/Clash Meta 配置�
 - 读取当前页面相关路由信息，展示命中的规则、目标域名、代理链路与可编辑规则项。
 - 切换 selector / url-test / fallback 等代理组当前选择，并尝试关闭现有连接后刷新页面验证。
 - 管理默认代理端口、代理类型、代理认证用户；Firefox 支持按标签页代理隔离，Chrome 使用全局代理。
+- 代理可用性守护：接管浏览器代理前先校验 Mihomo API 可达性，不可用时保持直连并在恢复后自动接管；Mihomo API 与本机回环流量始终直连，保证控制面自愈。
 - 执行 IpCheck，检测出口 IP、风险标签、地理信息，以及 ChatGPT、Claude、Gemini、Netflix、Disney+、Prime Video、YouTube Premium 等可用性。
 - 调用本地 Mihomo API 与远端 Sub Magic API，快速新增、更新、删除规则，并支持优先级位置控制与 GeoSite / GeoIP 建议。
 

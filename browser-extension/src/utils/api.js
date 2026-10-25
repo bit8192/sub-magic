@@ -260,6 +260,10 @@ export async function getMihomoConfigs(url, secret) {
 	return mihomoFetch(url, secret, '/configs')
 }
 
+export async function getMihomoConnections(url, secret) {
+	return mihomoFetch(url, secret, '/connections')
+}
+
 function normalizeAuthUsers(authentication) {
 	if (!Array.isArray(authentication)) return []
 	return authentication
@@ -278,36 +282,12 @@ function serializeAuthUsers(users) {
 	return users.map((user) => `${user.username}:${user.password}`)
 }
 
-function buildIpCheckRuleProvider(domains, username = 'IpCheck') {
-	return {
-		type: 'inline',
-		behavior: 'classical',
-		format: 'yaml',
-		payload: ensureUniqueValues(domains).map((domain) => `AND,((IN-USER,${username}),(DOMAIN-SUFFIX,${domain}))`),
-	}
-}
-
-function buildIpCheckRule(providerName = 'IpCheck', groupName = 'IpCheck') {
-	return `RULE-SET,${providerName},${groupName}`
+function buildIpCheckRule(username = 'IpCheck', groupName = 'IpCheck') {
+	return `IN-USER,${username},${groupName}`
 }
 
 function ensureUniqueValues(values) {
 	return [...new Set((values || []).map((value) => String(value || '').trim()).filter(Boolean))]
-}
-
-function extractIpCheckProviderDomains(provider, username = 'IpCheck') {
-	const payload = Array.isArray(provider?.payload) ? provider.payload : []
-	const domains = []
-	const pattern = new RegExp(`IN-USER,${username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)\\s*,\\s*\\(DOMAIN-SUFFIX,([^\\)]+)\\)`, 'i')
-	for (const entry of payload) {
-		const text = String(entry || '').trim()
-		if (!text) continue
-		const match = text.match(pattern)
-		if (match && match[1]) {
-			domains.push(match[1].trim())
-		}
-	}
-	return ensureUniqueValues(domains)
 }
 
 function findIpCheckRuleAnchor(currentRules) {
@@ -323,15 +303,13 @@ function findIpCheckRuleAnchor(currentRules) {
 	return anchor
 }
 
-function removeManagedIpCheckRules(currentRules, providerName = 'IpCheck', groupName = 'IpCheck', username = 'IpCheck') {
-	const canonicalRule = buildIpCheckRule(providerName, groupName)
+function removeManagedIpCheckRules(currentRules, groupName = 'IpCheck', username = 'IpCheck') {
+	const canonicalRule = buildIpCheckRule(username, groupName)
 	return currentRules.filter((rule) => {
 		const normalized = String(rule || '').trim()
 		if (!normalized) return false
 		if (normalized === canonicalRule) return false
-		if (normalized.includes(`IN-USER,${username}`)) return false
-		if (normalized.includes(`RULE-SET,${providerName}`)) return false
-		if (normalized.endsWith(`,${groupName}`) && normalized.includes('DOMAIN-SUFFIX,')) return false
+		if (normalized.startsWith(`IN-USER,${username},`)) return false
 		return true
 	})
 }
@@ -348,14 +326,11 @@ export async function ensureIpCheckLocalConfig(mihomoUrl, secret, options = {}) 
 	const username = String(options.username || 'IpCheck').trim()
 	const password = String(options.password || '').trim()
 	const groupName = String(options.groupName || 'IpCheck').trim()
-	const providerName = String(options.providerName || groupName).trim()
-	const domains = ensureUniqueValues(options.domains || [])
 
 	if (!targetGroup) throw new Error('targetGroup is required')
 	if (!username) throw new Error('username is required')
 	if (!password) throw new Error('password is required')
 	if (!groupName) throw new Error('groupName is required')
-	if (!providerName) throw new Error('providerName is required')
 
 	const currentConfig = (await getMihomoConfigs(mihomoUrl, secret)) || {}
 	const authUsers = normalizeAuthUsers(currentConfig.authentication)
@@ -397,19 +372,9 @@ export async function ensureIpCheckLocalConfig(mihomoUrl, secret, options = {}) 
 		}
 	}
 
-	const currentProviders = (currentConfig['rule-providers'] && typeof currentConfig['rule-providers'] === 'object')
-		? { ...currentConfig['rule-providers'] }
-		: {}
-	const existingProviderDomains = extractIpCheckProviderDomains(currentProviders[providerName], username)
-	const nextProvider = buildIpCheckRuleProvider([...existingProviderDomains, ...domains], username)
-	if (JSON.stringify(currentProviders[providerName] || {}) !== JSON.stringify(nextProvider)) {
-		currentProviders[providerName] = nextProvider
-		changed = true
-	}
-
 	const currentRules = normalizeRules(currentConfig.rules)
 	const anchor = findIpCheckRuleAnchor(currentRules)
-	const canonicalRule = buildIpCheckRule(providerName, groupName)
+	const canonicalRule = buildIpCheckRule(username, groupName)
 	const nextRules = currentRules.includes(canonicalRule)
 		? currentRules
 		: insertRuleWithAnchor(currentRules, canonicalRule, anchor)
@@ -423,7 +388,6 @@ export async function ensureIpCheckLocalConfig(mihomoUrl, secret, options = {}) 
 			body: JSON.stringify({
 				...currentConfig,
 				authentication: serializeAuthUsers(authUsers),
-				'rule-providers': currentProviders,
 				'proxy-groups': currentGroups,
 				rules: nextRules,
 			}),
@@ -651,14 +615,11 @@ export async function ensureIpCheckRemoteConfig(subMagicUrl, accessKey, options 
 	const username = String(options.username || 'IpCheck').trim()
 	const password = String(options.password || '').trim()
 	const groupName = String(options.groupName || 'IpCheck').trim()
-	const providerName = String(options.providerName || groupName).trim()
-	const domains = ensureUniqueValues(options.domains || [])
 
 	if (!targetGroup) throw new Error('targetGroup is required')
 	if (!username) throw new Error('username is required')
 	if (!password) throw new Error('password is required')
 	if (!groupName) throw new Error('groupName is required')
-	if (!providerName) throw new Error('providerName is required')
 
 	let changed = false
 	const remoteUsers = await getProxyAuthUsers(subMagicUrl, accessKey)
@@ -701,32 +662,12 @@ export async function ensureIpCheckRemoteConfig(subMagicUrl, accessKey, options 
 		}
 	}
 
-	const remoteProviders = await getRemoteRuleProviders(subMagicUrl, accessKey)
-	const providers = Array.isArray(remoteProviders) ? remoteProviders : []
-	const existingProvider = providers.find((provider) => String(provider?.name || '') === providerName) || null
-	const existingProviderDomains = extractIpCheckProviderDomains(existingProvider, username)
-	const nextProvider = buildIpCheckRuleProvider([...existingProviderDomains, ...domains], username)
-	if (!existingProvider) {
-		await createRemoteRuleProvider(subMagicUrl, accessKey, {
-			name: providerName,
-			...nextProvider,
-		})
-		changed = true
-	} else {
-		const currentProviderData = { ...existingProvider }
-		delete currentProviderData.name
-		if (JSON.stringify(currentProviderData) !== JSON.stringify(nextProvider)) {
-			await updateRemoteRuleProvider(subMagicUrl, accessKey, providerName, nextProvider)
-			changed = true
-		}
-	}
-
 	const remoteRules = await getRemoteRules(subMagicUrl, accessKey)
 	const currentRules = Array.isArray(remoteRules)
 		? remoteRules.map((item) => ruleEntryToString(item?.raw || item)).filter(Boolean)
 		: []
 	const anchor = findIpCheckRuleAnchor(currentRules)
-	const canonicalRule = buildIpCheckRule(providerName, groupName)
+	const canonicalRule = buildIpCheckRule(username, groupName)
 	const nextRules = currentRules.includes(canonicalRule)
 		? currentRules
 		: insertRuleWithAnchor(currentRules, canonicalRule, anchor)

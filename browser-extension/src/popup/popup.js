@@ -11,6 +11,7 @@ import {
 	getListeners,
 	getLocalRules,
 	getMihomoConfigs,
+	getMihomoConnections,
 	getProxyAuthUsers,
 	getProxySnapshot,
 	getProxyProviders,
@@ -55,9 +56,13 @@ const state = {
 	routingData: null,
 	proxyPanelCollapsed: false,
 	proxyPanelTouched: false,
+	proxyAvailability: null,
+	controlsReady: false,
 	geoSuggestionSeq: 0,
 	ipCheckByGroupKey: {},
-	ipCheckKnownDomains: [],
+	ipCheckQueue: Promise.resolve(),
+	selectorIpCheckByName: {},
+
 	logicalRuleDraft: null,
 }
 
@@ -79,39 +84,18 @@ const LOGICAL_OPERAND_TYPES = [
 ]
 const IPCHECK_USERNAME = 'IpCheck'
 const IPCHECK_DEFAULT_PASSWORD = 'submagic-ipcheck'
-const IPCHECK_RULE_DOMAINS = [
-	'ip.sb',
-	'api.ip.sb',
-	'ipapi.is',
-	'ipapi.co',
-	'ipinfo.io',
-	'api.db-ip.com',
-	'chatgpt.com',
-	'openai.com',
-	'claude.ai',
-	'anthropic.com',
-	'gemini.google.com',
-	'google.com',
-	'youtube.com',
-	'netflix.com',
-	'disneyplus.com',
-	'dssott.com',
-	'primevideo.com',
-	'ipv6.netflix.com',
-]
-
-state.ipCheckKnownDomains = [...IPCHECK_RULE_DOMAINS]
 
 let pollTimer = null
 let proxyRefreshTimer = null
 let observedTabUpdateHandler = null
 
-document.addEventListener('DOMContentLoaded', async () => {
-	await initCurrentTab()
-	await loadSettings()
-	await loadProxyState()
-	refreshRuleTypeAvailability()
+document.addEventListener('DOMContentLoaded', () => {
+	// 事件绑定先于任何异步初始化执行：面板骨架立即可交互，不等待网络数据
+	bindPopupEvents()
+	void initPopup()
+})
 
+function bindPopupEvents() {
 	document.getElementById('btn-add-rule').addEventListener('click', handleAddRule)
 	document.getElementById('btn-save-rule').addEventListener('click', handleSaveRule)
 	document.getElementById('btn-delete-rule').addEventListener('click', handleDeleteRule)
@@ -124,8 +108,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 	document.getElementById('btn-apply-proxy').addEventListener('click', handleApplyProxy)
 	document.getElementById('btn-toggle-proxy-panel').addEventListener('click', toggleProxyPanel)
 	document.getElementById('rule-type').addEventListener('change', onRuleTypeChange)
-	document.getElementById('selector-result').addEventListener('click', handleSelectorResultClick)
+	document.getElementById('selector-result').addEventListener('click', (event) => {
+		handleSelectorIpCheckClick(event)
+		handleSelectorResultClick(event)
+	})
 	document.getElementById('ipcheck-result').addEventListener('click', handleIpCheckResultClick)
+	document.getElementById('btn-batch-selector-ipcheck').addEventListener('click', () => {
+		runBatchSelectorIpCheck(state.currentSelector)
+	})
 	document.getElementById('geo-suggestion-box').addEventListener('click', handleGeoSuggestionClick)
 	document.getElementById('proxy-port').addEventListener('change', () => refreshProxyForm())
 	document.getElementById('proxy-type').addEventListener('change', () => refreshProxyForm())
@@ -144,16 +134,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 			document.getElementById('rule-proxy-input').style.display = 'none'
 		}
 	})
+}
 
-	if (state.mihomo.url) {
-		await refreshControlPanelButton()
-		await refreshProxyControls()
-		await refreshProxyData(true)
-		await startRoutingPoll()
-	} else {
-		refreshControlPanelButton()
-		refreshProxyMeta({ ok: false, reason: '请先在设置中配置 Mihomo API。' })
-	}
+async function initPopup() {
+	await initCurrentTab()
+	await loadSettings()
+	await loadProxyState()
+	refreshRuleTypeAvailability()
 
 	window.addEventListener('pagehide', () => {
 		if (pollTimer) clearInterval(pollTimer)
@@ -174,7 +161,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 	})
 
 	startTabReloadObserver()
-})
+
+	if (state.mihomo.url) {
+		// 各面板独立加载、互不阻塞：先渲染骨架，数据到位后各自刷新
+		await Promise.allSettled([
+			refreshControlPanelButton(),
+			refreshProxyControls(),
+			refreshProxyData(true),
+			startRoutingPoll(),
+		])
+	} else {
+		refreshControlPanelButton()
+		refreshProxyMeta({ ok: false, reason: '请先在设置中配置 Mihomo API。' })
+	}
+}
 
 async function loadSettings() {
 	const data = await chrome.storage.sync.get(['mihomoUrl', 'mihomoSecret', 'subMagicUrl', 'subMagicKey'])
@@ -253,7 +253,19 @@ async function loadProxyState() {
 	state.browser = response.browser || state.browser
 	state.proxyIsolation = !!response.isolationEnabled
 	state.proxyProfile = response.profile || null
+	state.proxyAvailability = response.availability || null
 	applyProxyProfileToForm()
+}
+
+/** 轻量刷新后台代理状态（不重置表单），供定时器轮询可用性变化 */
+async function refreshProxyRuntimeState() {
+	const response = await chrome.runtime.sendMessage({ type: 'PROXY_GET_STATE', tabId: state.tabId }).catch(() => null)
+	if (!response) return
+	state.browser = response.browser || state.browser
+	state.proxyIsolation = !!response.isolationEnabled
+	state.proxyProfile = response.profile || state.proxyProfile
+	state.proxyAvailability = response.availability || null
+	refreshProxyMeta()
 }
 
 function ensureHttpUrl(url) {
@@ -527,11 +539,15 @@ async function refreshProxyControls() {
 			(state.proxyProfile.authUser?.username || '') !== (nextProfile.authUser?.username || '')
 		state.proxyProfile = nextProfile
 		if (needsBootstrap && nextProfile.enabled !== false) {
-			await chrome.runtime.sendMessage({ type: 'PROXY_SET_STATE', tabId: state.tabId, profile: nextProfile })
+			const response = await chrome.runtime.sendMessage({ type: 'PROXY_SET_STATE', tabId: state.tabId, profile: nextProfile }).catch(() => null)
+			if (response?.profile) state.proxyProfile = response.profile
+			if (response?.availability) state.proxyAvailability = response.availability
 		}
 		refreshProxyMeta()
 	} catch (error) {
 		refreshProxyMeta({ ok: false, reason: `代理控制初始化失败: ${error.message}` })
+	} finally {
+		state.controlsReady = true
 	}
 }
 
@@ -565,13 +581,18 @@ function updateApplyButton(validation, draftProfile) {
 	if (!validation.ok) {
 		button.disabled = true
 		button.classList.add('btn-secondary')
-		button.textContent = '不可用'
+		button.textContent = state.controlsReady ? '不可用' : '加载中'
 		return
 	}
 
 	button.disabled = false
 	const currentActive = isProxyProfileActive(state.proxyProfile)
 	const applied = getProfileSignature(state.proxyProfile) === getProfileSignature(draftProfile)
+	if (applied && currentActive && state.proxyAvailability?.status === 'unavailable') {
+		button.classList.add('btn-warning')
+		button.textContent = '待 Mihomo 恢复'
+		return
+	}
 	if (applied) {
 		button.classList.add('btn-warning')
 		button.textContent = '关闭代理'
@@ -615,6 +636,15 @@ function refreshProxyMeta(overrideValidation = null) {
 	const validation = overrideValidation || buildProxyValidation(draftProfile)
 
 	if (!validation.ok) {
+		// Mihomo 配置尚未加载完成时展示加载态，而不是误导性的「不可用」
+		if (!state.controlsReady && state.mihomo.url && !overrideValidation) {
+			statusEl.textContent = '加载中...'
+			statusEl.className = 'routing-status loading'
+			metaEl.innerHTML = `隔离模式: <strong>${state.proxyIsolation ? '按标签页' : '全局共享'}</strong><br>正在读取 Mihomo 配置...`
+			updateApplyButton(validation, draftProfile)
+			syncProxyPanelCollapsed()
+			return
+		}
 		statusEl.textContent = '不可用'
 		statusEl.className = 'routing-status error'
 		metaEl.innerHTML = `隔离模式: <strong>${state.proxyIsolation ? '按标签页' : '全局共享'}</strong><br>${escHtml(validation.reason)}`
@@ -627,9 +657,24 @@ function refreshProxyMeta(overrideValidation = null) {
 	draftProfile.host = validation.host
 	draftProfile.listenerName = validation.listenerName
 	draftProfile.source = validation.source
-	statusEl.textContent = isProxyProfileActive(state.proxyProfile) ? '代理中' : '未代理'
-	statusEl.className = 'routing-status connected'
-	metaEl.innerHTML = `隔离模式: <strong>${state.proxyIsolation ? '按标签页' : '全局共享'}</strong><br>地址: <strong>${escHtml(validation.host)}:${validation.port}</strong>`
+
+	const profileActive = isProxyProfileActive(state.proxyProfile)
+	const mihomoUnavailable = state.proxyAvailability?.status === 'unavailable'
+	if (profileActive && mihomoUnavailable) {
+		statusEl.textContent = 'Mihomo 不可用'
+		statusEl.className = 'routing-status error'
+	} else {
+		statusEl.textContent = profileActive ? '代理中' : '未代理'
+		statusEl.className = 'routing-status connected'
+	}
+
+	let metaHtml = `隔离模式: <strong>${state.proxyIsolation ? '按标签页' : '全局共享'}</strong><br>地址: <strong>${escHtml(validation.host)}:${validation.port}</strong>`
+	if (profileActive && mihomoUnavailable) {
+		metaHtml += `<br>${escHtml(state.proxyAvailability?.reason || 'Mihomo API 不可达')}（代理暂未接管，恢复后自动启用）`
+	} else if (profileActive && state.proxyAvailability?.status === 'checking') {
+		metaHtml += '<br>正在校验 Mihomo 可用性...'
+	}
+	metaEl.innerHTML = metaHtml
 	updateApplyButton(validation, draftProfile)
 	syncProxyPanelCollapsed()
 }
@@ -671,7 +716,10 @@ async function handleApplyProxy() {
 
 	state.proxyProfile = profile
 	const shouldPersist = !(applied && state.proxyIsolation)
-	await chrome.runtime.sendMessage({ type: 'PROXY_SET_STATE', tabId: state.tabId, profile, persist: shouldPersist })
+	const response = await chrome.runtime.sendMessage({ type: 'PROXY_SET_STATE', tabId: state.tabId, profile, persist: shouldPersist }).catch(() => null)
+	// 后台可能因 Mihomo 不可用而暂缓接管，以后台返回的生效状态为准
+	if (response?.profile) state.proxyProfile = response.profile
+	if (response?.availability) state.proxyAvailability = response.availability
 	refreshProxyMeta()
 }
 
@@ -687,7 +735,10 @@ async function startRoutingPoll() {
 	}, 2000)
 
 	proxyRefreshTimer = setInterval(async () => {
-		await refreshProxyData()
+		await Promise.allSettled([
+			refreshProxyData(),
+			refreshProxyRuntimeState(),
+		])
 	}, 10000)
 }
 
@@ -1041,7 +1092,7 @@ function renderIpCheckPanel(group) {
 	const details = entry.details || {}
 	const services = entry.services || {}
 	const references = entry.references || {}
-	const uncoveredRedirectDomains = getIpCheckUncoveredRedirectDomains(entry)
+
 	const mapRows = (rows) => rows.map(([label, value]) => {
 		const content = value && typeof value === 'object' && 'html' in value
 			? value.html
@@ -1317,16 +1368,6 @@ function renderIpCheckPanel(group) {
 	)
 	resultEl.innerHTML = `
 		<div class="ipcheck-result success">
-			${uncoveredRedirectDomains.length > 0 ? `
-				<div class="ipcheck-group">
-					<div class="ipcheck-group-title">重定向规则补齐</div>
-					<div class="ipcheck-redirect-note">以下重定向后的域名未被当前 IpCheck 规则覆盖：</div>
-					<div class="ipcheck-redirect-list">${uncoveredRedirectDomains.map((domain) => `<code>${escHtml(domain)}</code>`).join('')}</div>
-					<div class="ipcheck-redirect-actions">
-						<button class="btn btn-secondary btn-ipcheck-retry-redirect" data-route-key="${escAttr(buildRoutingGroupKey(group))}">添加规则并重试</button>
-					</div>
-				</div>
-			` : ''}
 			<div class="ipcheck-group">
 				<div class="ipcheck-group-title">基础信息</div>
 				${mapRows([
@@ -1424,37 +1465,6 @@ function renderIpCheckPanel(group) {
 	`
 }
 
-function getKnownIpCheckDomains() {
-	return Array.isArray(state.ipCheckKnownDomains) && state.ipCheckKnownDomains.length > 0
-		? state.ipCheckKnownDomains
-		: IPCHECK_RULE_DOMAINS
-}
-
-function isIpCheckDomainCovered(hostname, domains = getKnownIpCheckDomains()) {
-	const host = String(hostname || '').trim().toLowerCase()
-	if (!host) return false
-	return domains.some((domain) => {
-		const normalized = String(domain || '').trim().toLowerCase()
-		return normalized && (host === normalized || host.endsWith(`.${normalized}`))
-	})
-}
-
-function getIpCheckUncoveredRedirectDomains(entry) {
-	const rawServices = entry?.raw?.services || {}
-	const domains = Object.values(rawServices)
-		.map((item) => {
-			const url = String(item?.url || '').trim()
-			if (!url) return ''
-			try {
-				return new URL(url).hostname
-			} catch {
-				return ''
-			}
-		})
-		.filter(Boolean)
-	return [...new Set(domains.filter((domain) => !isIpCheckDomainCovered(domain)))]
-}
-
 function getIpCheckBaseProfile() {
 	const host = getMihomoHost()
 	if (!host) {
@@ -1519,14 +1529,9 @@ async function resolveIpCheckPassword() {
 	return IPCHECK_DEFAULT_PASSWORD
 }
 
-async function ensureIpCheckConfig(targetGroup, password, extraDomains = []) {
+async function ensureIpCheckConfig(targetGroup, password) {
 	const messages = []
 	const remoteEnabled = !!(state.subMagic.url && state.subMagic.accessKey)
-	const mergedDomains = [...new Set([
-		...getKnownIpCheckDomains(),
-		...extraDomains.map((item) => String(item || '').trim()).filter(Boolean),
-	])]
-	state.ipCheckKnownDomains = mergedDomains
 
 	if (remoteEnabled) {
 		try {
@@ -1535,7 +1540,6 @@ async function ensureIpCheckConfig(targetGroup, password, extraDomains = []) {
 				username: IPCHECK_USERNAME,
 				password,
 				groupName: IPCHECK_GROUP_NAME,
-				domains: mergedDomains,
 			})
 			if (remoteResult.changed) {
 				messages.push('远程配置已补齐')
@@ -1551,7 +1555,6 @@ async function ensureIpCheckConfig(targetGroup, password, extraDomains = []) {
 		username: IPCHECK_USERNAME,
 		password,
 		groupName: IPCHECK_GROUP_NAME,
-		domains: mergedDomains,
 	})
 	password = localResult.authUser?.password || password
 	if (localResult.changed) {
@@ -1564,9 +1567,9 @@ async function ensureIpCheckConfig(targetGroup, password, extraDomains = []) {
 	}
 }
 
-async function handleIpCheck(group, options = {}) {
-	const targetGroup = resolveIpCheckTarget(group.chain)
-	if (!targetGroup || targetGroup === 'DIRECT') {
+async function runIpCheckTask(group) {
+	const rawTarget = resolveIpCheckTarget(group.chain)
+	if (!rawTarget || rawTarget === 'DIRECT') {
 		setIpCheckState(group, { status: 'error', message: '当前链路没有可检测的代理组' })
 		updateRoutingDisplay(state.routingData || { groups: [] })
 		return
@@ -1577,15 +1580,18 @@ async function handleIpCheck(group, options = {}) {
 		return
 	}
 
+	const targetGroup = resolveFinalProxyName(rawTarget)
+
 	try {
 		const baseProfile = getIpCheckBaseProfile()
-		setIpCheckState(group, { status: 'configuring', message: `准备 ${targetGroup} 的 IpCheck 配置...` })
+		setIpCheckState(group, { status: 'configuring', message: `准备 ${rawTarget} 的 IpCheck 配置...` })
 		updateRoutingDisplay(state.routingData || { groups: [] })
 
 		const ipCheckPassword = await resolveIpCheckPassword()
-		const ensured = await ensureIpCheckConfig(targetGroup, ipCheckPassword, options.extraDomains || [])
+		const ensured = await ensureIpCheckConfig(targetGroup, ipCheckPassword)
 		await setProxySelector(state.mihomo.url, state.mihomo.secret, IPCHECK_GROUP_NAME, targetGroup)
 		await refreshProxyData()
+		await closeIpCheckUserConnections()
 
 		setIpCheckState(group, {
 			status: 'probing',
@@ -1615,19 +1621,113 @@ async function handleIpCheck(group, options = {}) {
 	}
 }
 
+function handleIpCheck(group) {
+	const promise = state.ipCheckQueue.then(
+		() => runIpCheckTask(group),
+		() => runIpCheckTask(group),
+	)
+	state.ipCheckQueue = promise.catch(() => {})
+	return promise
+}
+
+async function runBatchIpCheck(groups) {
+	const candidates = (groups || []).filter((group) => {
+		const target = resolveIpCheckTarget(group.chain)
+		return target && target !== 'DIRECT'
+	})
+	if (candidates.length === 0) return
+	for (const group of candidates) {
+		// 已在检测中的跳过
+		const entry = getIpCheckState(group)
+		if (entry && (entry.status === 'configuring' || entry.status === 'probing')) continue
+		handleIpCheck(group)
+	}
+}
+
 async function handleIpCheckResultClick(event) {
-	const button = event.target.closest('.btn-ipcheck-retry-redirect')
-	if (!button) return
-	const routeKey = String(button.dataset.routeKey || '').trim()
-	if (!routeKey) return
-	const groups = Array.isArray(state.routingData?.groups) ? state.routingData.groups : []
-	const group = groups.find((item) => buildRoutingGroupKey(item) === routeKey)
-	if (!group) return
-	const entry = getIpCheckState(group)
-	const extraDomains = getIpCheckUncoveredRedirectDomains(entry)
-	if (extraDomains.length === 0) return
-	button.disabled = true
-	await handleIpCheck(group, { extraDomains })
+	// IN-USER 规则已覆盖所有 ipcheck 流量，无需重试逻辑
+	event.preventDefault()
+}
+
+function getFlagEmoji(countryCode) {
+	const code = String(countryCode || '').trim().toUpperCase()
+	if (!code || code.length !== 2) return ''
+	return String.fromCodePoint(0x1F1E6 + code.charCodeAt(0) - 65, 0x1F1E6 + code.charCodeAt(1) - 65)
+}
+
+async function runSelectorIpCheckTask(proxyName, targetName) {
+	if (!state.mihomo.url) {
+		state.selectorIpCheckByName[targetName] = { status: 'error', message: '请先配置 Mihomo API' }
+		renderSelectorPanel(proxyName)
+		return
+	}
+
+	const finalTarget = resolveFinalProxyName(targetName)
+
+	try {
+		state.selectorIpCheckByName[targetName] = { status: 'configuring', message: '准备中...' }
+		renderSelectorPanel(proxyName)
+
+		const ipCheckPassword = await resolveIpCheckPassword()
+		const ensured = await ensureIpCheckConfig(finalTarget, ipCheckPassword)
+		await setProxySelector(state.mihomo.url, state.mihomo.secret, IPCHECK_GROUP_NAME, finalTarget)
+		await refreshProxyData()
+		await closeIpCheckUserConnections()
+
+		state.selectorIpCheckByName[targetName] = { status: 'probing', message: '检测中...' }
+		renderSelectorPanel(proxyName)
+
+		const baseProfile = getIpCheckBaseProfile()
+		const result = await chrome.runtime.sendMessage({
+			type: 'IPCHECK_PROBE',
+			profile: baseProfile,
+			authUser: ensured.authUser,
+		})
+
+		if (!result?.ok) {
+			throw new Error(result?.error || 'IP 检测失败')
+		}
+
+		state.selectorIpCheckByName[targetName] = {
+			status: 'success',
+			...result,
+			targetGroup: targetName,
+		}
+		renderSelectorPanel(proxyName)
+	} catch (error) {
+		state.selectorIpCheckByName[targetName] = { status: 'error', message: error.message || 'IP 检测失败' }
+		renderSelectorPanel(proxyName)
+	}
+}
+
+function handleSelectorIpCheck(proxyName, targetName) {
+	const promise = state.ipCheckQueue.then(
+		() => runSelectorIpCheckTask(proxyName, targetName),
+		() => runSelectorIpCheckTask(proxyName, targetName),
+	)
+	state.ipCheckQueue = promise.catch(() => {})
+	return promise
+}
+
+async function runBatchSelectorIpCheck(proxyName) {
+	const proxy = state.proxyMap[proxyName]
+	if (!proxy) return
+	const candidateNames = Array.isArray(proxy.all) ? proxy.all : []
+	if (candidateNames.length === 0) return
+
+	for (const name of candidateNames) {
+		const entry = state.selectorIpCheckByName[name]
+		if (entry && (entry.status === 'configuring' || entry.status === 'probing')) continue
+		handleSelectorIpCheck(proxyName, name)
+	}
+}
+
+function handleSelectorIpCheckClick(event) {
+	const badge = event.target.closest('.selector-ipcheck-badge')
+	if (!badge) return
+	const name = badge.getAttribute('data-ipcheck-name') || ''
+	if (!name) return
+	handleSelectorIpCheck(state.currentSelector, name)
 }
 
 function renderIssueLine(group) {
@@ -1727,6 +1827,21 @@ async function closeConnectionsByIds(connectionIds) {
 	}
 }
 
+async function closeIpCheckUserConnections() {
+	if (!state.mihomo.url) return { total: 0, closed: 0, failed: 0 }
+	try {
+		const data = await getMihomoConnections(state.mihomo.url, state.mihomo.secret)
+		const connections = Array.isArray(data?.connections) ? data.connections : []
+		const ids = connections
+			.filter((c) => String(c?.metadata?.user || '').trim() === IPCHECK_USERNAME)
+			.map((c) => String(c?.id || '').trim())
+			.filter(Boolean)
+		return await closeConnectionsByIds(ids)
+	} catch {
+		return { total: 0, closed: 0, failed: 0 }
+	}
+}
+
 async function showAddPanel(domain, destinationIps = []) {
 	debugRuleEdit('showAddPanel', { domain, destinationIps, fallbackDomain: state.domain })
 	document.getElementById('routing-section').style.display = 'none'
@@ -1814,6 +1929,23 @@ async function openSelectorPanel(proxyName, routeKey = '') {
 	}
 }
 
+function renderSelectorIpCheckBadge(name) {
+	const entry = state.selectorIpCheckByName[name] || null
+	if (!entry) {
+		return `<span class="selector-ipcheck-badge" data-ipcheck-name="${escAttr(name)}">检测</span>`
+	}
+	if (entry.status === 'configuring' || entry.status === 'probing') {
+		return `<span class="selector-ipcheck-badge probing">检测中...</span>`
+	}
+	if (entry.status === 'error') {
+		return `<span class="selector-ipcheck-badge error" title="${escAttr(entry.message || '检测失败')}">失败</span>`
+	}
+	const location = [entry.countryCode || entry.country, entry.city].filter(Boolean).join(' ')
+	const flag = entry.countryCode ? getFlagEmoji(entry.countryCode) : ''
+	const tooltip = [entry.ip, location, entry.isp].filter(Boolean).join(' · ')
+	return `<span class="selector-ipcheck-badge success" title="${escAttr(tooltip)}">${flag} ${escHtml(entry.ip || '')}</span>`
+}
+
 function renderSelectorPanel(proxyName) {
 	const proxy = state.proxyMap[proxyName]
 	const metaEl = document.getElementById('selector-meta')
@@ -1849,13 +1981,17 @@ function renderSelectorPanel(proxyName) {
 		const delaySource = delayInfo?.sourceName && delayInfo.sourceName !== name
 			? `当前出口: ${delayInfo.sourceName}`
 			: candidate.type || state.proxyMap[name]?.type || 'Unknown'
+		const ipCheckBadge = renderSelectorIpCheckBadge(name)
 
 		html += `<button class="selector-item${isCurrent ? ' is-current' : ''}" data-proxy="${escAttr(proxyName)}" data-target="${escAttr(name)}"${isCurrent ? ' disabled' : ''}>
 			<div class="selector-main">
 				<div class="selector-name">${escHtml(name)}</div>
 				<div class="selector-sub">${escHtml(delaySource)}</div>
 			</div>
-			<div class="selector-latency ${latencyTone}">${escHtml(latencyText)}</div>
+			<div class="selector-right">
+				<div class="selector-latency ${latencyTone}">${escHtml(latencyText)}</div>
+				${ipCheckBadge}
+			</div>
 		</button>`
 	}
 
@@ -1863,6 +1999,7 @@ function renderSelectorPanel(proxyName) {
 }
 
 async function handleSelectorResultClick(event) {
+	if (event.target.closest('.selector-ipcheck-badge')) return
 	const button = event.target.closest('.selector-item')
 	if (!button || button.disabled) return
 
@@ -1912,6 +2049,32 @@ function resolveProxyDelay(proxyName, visited = new Set()) {
 	}
 
 	return null
+}
+
+/**
+ * 递归解析代理组的最终出口节点名称。
+ * IpCheck 组使用 include-all-proxies，只包含底层代理节点，
+ * 无法直接选择 Selector/URLTest 等代理组，因此需要先解析为最终节点。
+ */
+function resolveFinalProxyName(proxyName, visited = new Set()) {
+	if (!proxyName || visited.has(proxyName)) return proxyName
+	visited.add(proxyName)
+
+	const proxy = state.proxyMap[proxyName]
+	if (!proxy) return proxyName
+
+	// 如果该节点有底层延迟数据，说明是最终代理节点
+	const directDelay = extractLatestDelay(proxy)
+	if (directDelay !== null) {
+		return proxyName
+	}
+
+	// 如果是代理组（Selector/URLTest 等），递归解析当前选择
+	if (proxy.now && proxy.now !== proxyName) {
+		return resolveFinalProxyName(proxy.now, visited)
+	}
+
+	return proxyName
 }
 
 function extractLatestDelay(proxy) {
