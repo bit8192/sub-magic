@@ -21,20 +21,21 @@ let appRendered = false
 export function renderApp() {
   if (appRendered) return
   appRendered = true
+  const pxCells = '<span class="px-cells" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>'
   const app = document.getElementById('app')
   app.innerHTML = `
     <div class="topbar">
       <h1>Sub Magic</h1>
       <nav>
-        <button data-view="index" onclick="switchView('index')">首页</button>
-        <button data-view="providers" onclick="switchView('providers')">订阅源</button>
-        <button data-view="groups" onclick="switchView('groups')">代理组</button>
-        <button data-view="rules" onclick="switchView('rules')">规则</button>
-        <button data-view="editor" onclick="switchView('editor')">文本编辑</button>
-        <button data-view="versions" onclick="switchView('versions')">历史版本</button>
-        <a href="https://github.com/bit8192/sub-magic" target="_blank" rel="noreferrer" class="nav-link">GitHub</a>
+        <button data-view="index" onclick="switchView('index')">首页${pxCells}</button>
+        <button data-view="providers" onclick="switchView('providers')">订阅源${pxCells}</button>
+        <button data-view="groups" onclick="switchView('groups')">代理组${pxCells}</button>
+        <button data-view="rules" onclick="switchView('rules')">规则${pxCells}</button>
+        <button data-view="editor" onclick="switchView('editor')">文本编辑${pxCells}</button>
+        <button data-view="versions" onclick="switchView('versions')">历史版本${pxCells}</button>
+        <a href="https://github.com/bit8192/sub-magic" target="_blank" rel="noreferrer" class="nav-link" data-tip="GitHub 仓库">GitHub</a>
       </nav>
-      <button class="btn-logout" onclick="doLogout()">登出</button>
+      <button class="btn-logout" data-tip="退出登录" onclick="doLogout()">登出</button>
     </div>
     <div id="view-container"></div>`
 }
@@ -52,6 +53,8 @@ export function switchView(view) {
   const container = document.getElementById('view-container')
   const renderFn = ROUTE_MAP[view]
   if (renderFn && container) {
+    // 异步视图加载期间展示 8-bit 逐格加载条，渲染完成后被覆盖
+    container.innerHTML = '<div class="px-loader" role="status" aria-label="加载中"></div>'
     renderFn(container)
   }
 }

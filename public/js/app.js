@@ -3,6 +3,8 @@ import { renderLogin, doLogin, doLogout, checkAuth, onLoggedIn, onLoggedOut, ren
 import { esc, toast, closeModal } from './utils.js'
 import { initRouter, switchView } from './router.js'
 import { initSync, closeSync, onConfigUpdated } from './sync.js'
+import { initFX } from './fx.js'
+import { initTypewriter } from './typewriter.js'
 import { copySubUrl, copyApiKey, rotateSubscriptionKey, rotateApiKey, copyAutoScript, copyUninstallScript, generateAutoScript } from './views/index.js'
 import { showProviderForm, saveProvider, deleteProvider } from './views/providers.js'
 // Provider usage functions are assigned to window inside providers.js
@@ -100,4 +102,6 @@ Object.assign(window, {
 })
 
 // Boot
+initFX()
+initTypewriter()
 checkAuth()
