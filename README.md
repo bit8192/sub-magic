@@ -213,7 +213,7 @@ https://your-worker.example.com/sub/{key}
 - 然后询问是否安装 Mihomo 服务。
 - 最后下载 `sub-magic.ps1` 到当前目录，并注册名为 `sub-magic` 的 Windows 计划任务，每 1 分钟执行一次更新脚本。
 
-Windows 更新脚本与 Linux 一样会携带 `If-None-Match` 和 `X-Sub-Magic-Long-Poll: 1`。当配置变更时，脚本会覆盖本地配置文件，并优先通过 `external-controller` 调用 Mihomo API 触发重载；若 API 不可用，则退回到重启 Mihomo 服务。
+Windows 更新脚本与 Linux 一样会携带 `If-None-Match` 和 `X-Sub-Magic-Long-Poll: 1`。当配置变更时，脚本会更新本地配置文件，并通过 `external-controller` 调用 Mihomo API 以 **payload 方式**（`PUT /configs` 直接推送配置全文）触发热重载——不依赖 Mihomo 自身的配置文件路径，发行版把 `/etc` 配置拷贝到状态目录再以 `-d` 运行的场景（如 Arch 的 mihomo 包）同样生效。若 Mihomo 拒绝新配置（如解析失败），脚本会记录拒绝原因并保留运行中的旧配置；仅当 API 不可达时才退回重启 Mihomo 服务。
 
 ### 规则快速写入 API
 

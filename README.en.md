@@ -211,7 +211,7 @@ The home page also provides a Windows install command. The script runs the follo
 - Then asks whether to install the Mihomo service.
 - Finally downloads `sub-magic.ps1` into the current directory and registers a Windows scheduled task named `sub-magic` that runs once per minute.
 
-Like Linux, the Windows update script sends `If-None-Match` and `X-Sub-Magic-Long-Poll: 1`. When the configuration changes, it overwrites the local config file and tries to trigger a reload through `external-controller` first; if the API is unavailable, it falls back to restarting the Mihomo service.
+Like Linux, the Windows update script sends `If-None-Match` and `X-Sub-Magic-Long-Poll: 1`. When the configuration changes, it updates the local config file and triggers a hot reload through `external-controller` in **payload mode** (`PUT /configs` pushes the full config text directly), so it does not depend on Mihomo's own config file path — distro packages that copy `/etc` config into a state directory and run Mihomo with `-d` (e.g. the Arch mihomo package) work as well. If Mihomo rejects the new config (e.g. a parse error), the script logs the reason and keeps the running config; only when the API is unreachable does it fall back to restarting the Mihomo service.
 
 ### Rule Write API
 

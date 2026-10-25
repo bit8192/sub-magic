@@ -99,22 +99,62 @@ function Get-ConfigValue {
 	return ($line -replace "^\s*$([regex]::Escape($Key))\s*:\s*", '').Trim().Trim('"').Trim("'")
 }
 
+function Read-ConfigText {
+	if (Test-Path -LiteralPath $TempFile) {
+		return [System.IO.File]::ReadAllText($TempFile)
+	}
+	if (Test-Path -LiteralPath $ConfigPath) {
+		return [System.IO.File]::ReadAllText($ConfigPath)
+	}
+	return $null
+}
+
 function Invoke-ConfigReload {
 	$controller = Get-ConfigValue -Key 'external-controller'
 	$secret = Get-ConfigValue -Key 'secret'
 
 	if (-not [string]::IsNullOrWhiteSpace($controller)) {
-		$headers = @{ 'Content-Type' = 'application/json' }
-		if (-not [string]::IsNullOrWhiteSpace($secret)) {
-			$headers['Authorization'] = "Bearer $secret"
+		# wildcard binds are not dialable on Windows; normalize to loopback
+		if ($controller -like '0.0.0.0:*') {
+			$controller = '127.0.0.1:' + $controller.Substring('0.0.0.0:'.Length)
 		}
 
-		try {
-			Invoke-WebRequest -Uri ("http://{0}/configs?force=true" -f $controller) -Method Put -Headers $headers -Body '{"path":"","payload":""}' -UseBasicParsing | Out-Null
-			Write-Log "Mihomo reloaded via API: $controller"
-			return
-		} catch {
-			Write-Warning 'API reload failed, falling back to service restart'
+		$configText = Read-ConfigText
+		if ($null -ne $configText) {
+			# Payload mode: push the freshly downloaded config directly to mihomo.
+			# Immune to runtime-path mismatch (distro packages or service wrappers
+			# that copy the config into a state dir and run mihomo with -d there).
+			$body = @{ path = ''; payload = $configText } | ConvertTo-Json -Compress
+			$headers = @{}
+			if (-not [string]::IsNullOrWhiteSpace($secret)) {
+				$headers['Authorization'] = "Bearer $secret"
+			}
+
+			try {
+				# NOTE: Content-Type must be passed via -ContentType. Windows
+				# PowerShell 5.1 throws when restricted headers are set via -Headers.
+				Invoke-WebRequest -Uri ("http://{0}/configs?force=true" -f $controller) -Method Put -Headers $headers -ContentType 'application/json' -Body $body -UseBasicParsing | Out-Null
+				Write-Log "Mihomo reloaded via API (payload): $controller"
+				return
+			} catch [System.Net.WebException] {
+				$response = $_.Exception.Response
+				if ($response) {
+					$statusCode = [int]$response.StatusCode
+					$detail = ''
+					try {
+						$reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+						$detail = $reader.ReadToEnd()
+					} catch {}
+					Write-Warning "Mihomo rejected the new config: HTTP $statusCode $detail"
+					# restarting would load the very same rejected file, keep the running config
+					return
+				}
+				Write-Warning "API reload failed: $($_.Exception.Message)"
+			} catch {
+				Write-Warning "API reload failed: $($_.Exception.Message)"
+			}
+		} else {
+			Write-Warning 'API reload skipped: downloaded config not available'
 		}
 	}
 
@@ -125,7 +165,7 @@ function Invoke-ConfigReload {
 			Write-Log "Mihomo restarted: $($service.Name)"
 			return
 		} catch {
-			Write-Warning "Service restart failed: $($service.Name)"
+			Write-Warning "Service restart failed (the scheduled task runs without admin rights): $($service.Name)"
 		}
 	}
 }
