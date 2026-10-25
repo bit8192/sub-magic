@@ -23,7 +23,8 @@ function getDO(env: Env) {
 export async function getConfig(env: Env): Promise<string | null> {
   if (hasDO(env)) {
     try {
-      return await getDO(env).getConfig()
+      const config = await getDO(env).getConfig()
+      if (config) return config
     } catch (e) {
       console.error('DO getConfig failed, falling back to KV:', e)
     }
@@ -33,10 +34,38 @@ export async function getConfig(env: Env): Promise<string | null> {
   return await ns.get(KV_CONFIG_KEY)
 }
 
+/* ─── Config: read directly from KV (fast path for read-only endpoints) ─── */
+
+export async function getConfigFromKv(env: Env): Promise<string | null> {
+  const ns = kv(env)
+  const cached = ns ? await ns.get(KV_CONFIG_KEY) : null
+  // KV 是 DO 的镜像缓存；还未写入时回退到 DO，避免首次部署读到空配置
+  if (cached) return cached
+  return await getConfig(env)
+}
+
+/** 让 KV 中的镜像与 DO 主存储保持一致（失败不影响主流程） */
+async function mirrorConfigToKv(env: Env, yamlText: string): Promise<void> {
+  const ns = kv(env)
+  if (!ns) return
+  try {
+    await ns.put(KV_CONFIG_KEY, yamlText)
+  } catch (e) {
+    console.error('KV mirror put failed:', e)
+  }
+}
+
+export async function getParsedConfigFromKv(env: Env): Promise<ClashConfig> {
+  const raw = await getConfigFromKv(env)
+  if (!raw) return {}
+  return parseConfig(raw)
+}
+
 export async function saveConfig(env: Env, yamlText: string): Promise<void> {
   if (hasDO(env)) {
     try {
       await getDO(env).setConfig(yamlText)
+      await mirrorConfigToKv(env, yamlText)
       return
     } catch (e) {
       console.error('DO setConfig failed, falling back to KV:', e)
@@ -50,7 +79,8 @@ export async function saveConfig(env: Env, yamlText: string): Promise<void> {
 export async function getParsedConfig(env: Env): Promise<ClashConfig> {
   if (hasDO(env)) {
     try {
-      return await getDO(env).getParsedConfig()
+      const parsed = await getDO(env).getParsedConfig()
+      if (parsed && Object.keys(parsed).length) return parsed
     } catch (e) {
       console.error('DO getParsedConfig failed, falling back to KV:', e)
     }
@@ -169,7 +199,12 @@ export async function getConfigVersion(env: Env, id: string): Promise<string | n
 export async function restoreConfigVersion(env: Env, id: string): Promise<boolean> {
   if (hasDO(env)) {
     try {
-      return await getDO(env).restoreVersion(id)
+      const ok = await getDO(env).restoreVersion(id)
+      if (ok) {
+        const restored = await getDO(env).getConfig()
+        if (restored) await mirrorConfigToKv(env, restored)
+      }
+      return ok
     } catch (e) {
       console.error('DO restoreVersion failed, falling back to KV:', e)
     }
@@ -178,7 +213,7 @@ export async function restoreConfigVersion(env: Env, id: string): Promise<boolea
   if (!ns) return false
   const config = await ns.get(`version:${id}`)
   if (!config) return false
-  await ns.put('config', config)
+  await ns.put(KV_CONFIG_KEY, config)
   return true
 }
 
@@ -210,6 +245,12 @@ export async function initConfigIfEmpty(env: Env): Promise<void> {
     try {
       const existing = await getDO(env).getConfig()
       if (existing) return
+      // DO 还没有内容时，把 KV 中的旧配置迁移过来（DO 作为主存储）
+      const legacy = kv(env) ? await kv(env)!.get(KV_CONFIG_KEY) : null
+      if (legacy) {
+        await getDO(env).setConfig(legacy)
+        return
+      }
     } catch {
       // DO 可能未就绪，继续尝试 KV
     }

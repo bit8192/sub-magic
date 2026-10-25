@@ -1,15 +1,17 @@
 import {
   getApiKeyHash,
   getConfig,
-  getParsedConfig,
+  getConfigFromKv,
+  getParsedConfigFromKv,
   getSubscriptionKey,
   saveConfig,
   getConfigVersions, getConfigVersion, saveConfigVersion,
   restoreConfigVersion, deleteConfigVersion,
 } from './config'
 import {
-  parseConfig, serializeConfig, parseRule, type Listener, type ProxyAuthUser, type ProxyGroup, type ProxyProvider, type RuleProvider,
+  parseRule, type Listener, type ProxyAuthUser, type ProxyGroup, type ProxyProvider, type RuleProvider,
 } from './yaml'
+import { ConfigDocument } from './config-doc'
 import {
   verifyPassword,
   verifySubscriptionKey,
@@ -74,6 +76,19 @@ function corsPreflight(request: Request): Response {
   })
 }
 
+/**
+ * 写操作统一走「文档原地编辑」：直接改 YAML AST 再序列化，
+ * 这样手写注释、锚点（&name）与别名（*name）以及未改动区域的排版都会保留。
+ */
+async function loadConfigDocument(env: Env): Promise<ConfigDocument> {
+  return ConfigDocument.fromText(await getConfig(env))
+}
+
+async function saveConfigDocument(env: Env, doc: ConfigDocument): Promise<void> {
+  doc.validate()
+  await saveConfig(env, doc.serialize())
+}
+
 async function requireAuthOrAccessKey(request: Request, env: Env): Promise<Response | null> {
   const accessErr = await requireAccessKey(request, env)
   if (!accessErr) return null
@@ -98,10 +113,6 @@ function serializeProxyAuthEntry(user: ProxyAuthUser): string {
   return `${user.username}:${user.password}`
 }
 
-function normalizeRuleArray(config: Record<string, unknown>): string[] {
-  return Array.isArray(config.rules) ? config.rules.map(rule => String(rule)) : []
-}
-
 function findMatchRuleIndex(rules: string[]): number {
   return rules.findIndex(rule => rule.trim().toUpperCase().startsWith('MATCH'))
 }
@@ -119,6 +130,16 @@ function getProxyAuthUsers(config: Record<string, unknown>): ProxyAuthUser[] {
   return Array.isArray(config.authentication)
     ? config.authentication.map(parseProxyAuthEntry).filter((entry): entry is ProxyAuthUser => !!entry)
     : []
+}
+
+function getProxyAuthUsersFromDocument(doc: ConfigDocument): ProxyAuthUser[] {
+  return getProxyAuthUsers((doc.value ?? {}) as Record<string, unknown>)
+}
+
+/** 读取顶层序列（不存在或类型不对时返回空数组） */
+function readSeq<T>(doc: ConfigDocument, key: string): T[] {
+  const value = doc.getIn<T[]>([key])
+  return Array.isArray(value) ? value : []
 }
 
 function normalizeListener(body: Record<string, unknown>): Listener {
@@ -227,19 +248,18 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     const insertAfter = String(body.insertAfter || '')
     if (!rule) return withCors(json({ error: 'rule is required' }, 400), request)
 
-    const config = await getParsedConfig(env)
-    const rules = normalizeRuleArray(config)
+    const doc = await loadConfigDocument(env)
+    const rules = doc.getIn<string[]>(['rules']) ?? []
     const insertIdx = insertAfter.trim()
       ? resolveRuleInsertIndex(rules, insertAfter)
       : (() => {
           const matchIdx = findMatchRuleIndex(rules)
           return matchIdx !== -1 ? matchIdx : rules.length
         })()
-    rules.splice(insertIdx, 0, rule)
 
-    config.rules = rules
-    await saveConfig(env, serializeConfig(config))
-    return withCors(json({ ok: true, ruleCount: rules.length }), request)
+    doc.insertAt(['rules'], insertIdx, rule)
+    await saveConfigDocument(env, doc)
+    return withCors(json({ ok: true, ruleCount: rules.length + 1 }), request)
   }
 
   if (path === '/api/rules/update' && method === 'POST') {
@@ -254,31 +274,34 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       return withCors(json({ error: 'oldRule and newRule are required' }, 400), request)
     }
 
-    const config = await getParsedConfig(env)
-    const rules = normalizeRuleArray(config)
+    const doc = await loadConfigDocument(env)
+    const rules = doc.getIn<string[]>(['rules']) ?? []
     const idx = rules.indexOf(oldRule)
     if (idx === -1) return withCors(json({ error: 'Rule not found' }, 404), request)
 
-    rules.splice(idx, 1)
-    const insertIdx = resolveRuleInsertIndex(rules, insertAfter)
-    rules.splice(insertIdx, 0, newRule)
-    config.rules = rules
-    await saveConfig(env, serializeConfig(config))
-    return withCors(json({ ok: true, ruleCount: rules.length }), request)
+    // 先移除旧规则再按插入位置放回；未变动的规则节点会被复用，注释随之保留
+    const nextRules = rules.filter((_, index) => index !== idx)
+    const insertIdx = resolveRuleInsertIndex(nextRules, insertAfter)
+    nextRules.splice(insertIdx, 0, newRule)
+
+    doc.syncSeq(['rules'], nextRules, value => String(value))
+    await saveConfigDocument(env, doc)
+    return withCors(json({ ok: true, ruleCount: nextRules.length }), request)
   }
 
   if (path === '/api/config/proxy-auth-users') {
     const authErr = await requireAuthOrAccessKey(request, env)
     if (authErr) return withCors(authErr, request)
 
-    const config = await getParsedConfig(env)
-    const users = getProxyAuthUsers(config)
-
     if (method === 'GET') {
+      const config = await getParsedConfigFromKv(env)
+      const users = getProxyAuthUsers(config)
       return withCors(json(users), request)
     }
 
     if (method === 'POST') {
+      const doc = await loadConfigDocument(env)
+      const users = getProxyAuthUsersFromDocument(doc)
       const body = await parseBody(request)
       const username = String(body.username || '').trim()
       const password = String(body.password || '')
@@ -288,11 +311,13 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
         return withCors(json({ error: 'User already exists' }, 409), request)
       }
 
-      config.authentication = [
-        ...users.map(serializeProxyAuthEntry),
-        serializeProxyAuthEntry({ username, password }),
-      ]
-      await saveConfig(env, serializeConfig(config))
+      doc.syncSeq(
+        ['authentication'],
+        [...users.map(serializeProxyAuthEntry),
+        serializeProxyAuthEntry({ username, password })],
+        value => String(value),
+      )
+      await saveConfigDocument(env, doc)
       return withCors(json({ ok: true }), request)
     }
   }
@@ -302,16 +327,18 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     if (authErr) return withCors(authErr, request)
 
     const username = decodeURIComponent(path.slice('/api/config/proxy-auth-users/'.length))
-    const config = await getParsedConfig(env)
-    const users = getProxyAuthUsers(config)
+    const doc = await loadConfigDocument(env)
+    const users = getProxyAuthUsersFromDocument(doc)
     if (!users.some(user => user.username === username)) {
       return withCors(json({ error: 'Not found' }, 404), request)
     }
 
-    config.authentication = users
-      .filter(user => user.username !== username)
-      .map(serializeProxyAuthEntry)
-    await saveConfig(env, serializeConfig(config))
+    doc.syncSeq(
+      ['authentication'],
+      users.filter(user => user.username !== username).map(serializeProxyAuthEntry),
+      value => String(value),
+    )
+    await saveConfigDocument(env, doc)
     return withCors(json({ ok: true }), request)
   }
 
@@ -319,14 +346,15 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     const authErr = await requireAuthOrAccessKey(request, env)
     if (authErr) return withCors(authErr, request)
 
-    const config = await getParsedConfig(env)
-    const listeners = Array.isArray(config.listeners) ? config.listeners : []
-
     if (method === 'GET') {
+      const config = await getParsedConfigFromKv(env)
+      const listeners = Array.isArray(config.listeners) ? config.listeners : []
       return withCors(json(listeners), request)
     }
 
     if (method === 'POST') {
+      const doc = await loadConfigDocument(env)
+      const listeners = readSeq<Listener>(doc, 'listeners')
       const body = await parseBody(request)
       const listener = normalizeListener(body)
       if (!listener.name) return withCors(json({ error: 'name is required' }, 400), request)
@@ -338,8 +366,8 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
         return withCors(json({ error: 'Listener already exists' }, 409), request)
       }
 
-      config.listeners = [...listeners, listener]
-      await saveConfig(env, serializeConfig(config))
+      doc.insertAt(['listeners'], listeners.length, listener)
+      await saveConfigDocument(env, doc)
       return withCors(json({ ok: true }), request)
     }
   }
@@ -349,14 +377,15 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     if (authErr) return withCors(authErr, request)
 
     const name = decodeURIComponent(path.slice('/api/config/listeners/'.length))
-    const config = await getParsedConfig(env)
-    const listeners = Array.isArray(config.listeners) ? config.listeners : []
-    if (!listeners.some(listener => listener?.name === name)) {
+    const doc = await loadConfigDocument(env)
+    const listeners = readSeq<Listener>(doc, 'listeners')
+    const idx = listeners.findIndex(listener => listener?.name === name)
+    if (idx === -1) {
       return withCors(json({ error: 'Not found' }, 404), request)
     }
 
-    config.listeners = listeners.filter(listener => listener?.name !== name)
-    await saveConfig(env, serializeConfig(config))
+    doc.deleteIn(['listeners', idx])
+    await saveConfigDocument(env, doc)
     return withCors(json({ ok: true }), request)
   }
 
@@ -364,7 +393,7 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     const authErr = await requireAuthOrAccessKey(request, env)
     if (authErr) return withCors(authErr, request)
 
-    const config = await getParsedConfig(env)
+    const config = await getParsedConfigFromKv(env)
     const externalUi = String(config['external-ui'] || '').trim()
     return withCors(json({ externalUi }), request)
   }
@@ -438,12 +467,12 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 
   // --- Config full text ---
   if (path === '/api/config' && method === 'GET') {
-    const raw = await getConfig(env)
+    const raw = await getConfigFromKv(env)
     return json({ config: raw || '' })
   }
 
   if (path === '/api/config/meta' && method === 'GET') {
-    const parsed = await getParsedConfig(env)
+    const parsed = await getParsedConfigFromKv(env)
     const meta: Record<string, unknown> = {}
     if (parsed['external-controller']) meta['external-controller'] = parsed['external-controller']
     if (parsed['external-ui']) meta['external-ui'] = parsed['external-ui']
@@ -455,7 +484,8 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     const body = await parseBody(request)
     const yamlText = String(body.config || '')
     try {
-      parseConfig(yamlText)
+      // 校验后原样落库：文本编辑不做格式化，注释与锚点连排版一起保留
+      ConfigDocument.parse(yamlText)
     } catch {
       return json({ error: 'Invalid YAML' }, 400)
     }
@@ -465,10 +495,9 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 
   // --- Proxy Providers ---
   if (path === '/api/config/proxy-providers') {
-    const config = await getParsedConfig(env)
-    const providers = config['proxy-providers'] || {}
-
     if (method === 'GET') {
+      const config = await getParsedConfigFromKv(env)
+      const providers = config['proxy-providers'] || {}
       const list = Object.entries(providers).map(([n, p]) => ({ name: n, ...p }))
       return json(list)
     }
@@ -477,36 +506,34 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       const body = await parseBody(request)
       const providerName = String(body.name || '').trim()
       if (!providerName) return json({ error: 'Name is required' }, 400)
-      if (providers[providerName]) return json({ error: 'Provider already exists' }, 409)
+      const doc = await loadConfigDocument(env)
+      if (doc.getIn(['proxy-providers', providerName]) !== undefined) {
+        return json({ error: 'Provider already exists' }, 409)
+      }
       const { name: _n, ...providerData } = body
-      providers[providerName] = providerData as ProxyProvider
-      config['proxy-providers'] = providers
-      await saveConfig(env, serializeConfig(config))
+      doc.updateMap(['proxy-providers', providerName], providerData as ProxyProvider)
+      await saveConfigDocument(env, doc)
       return json({ ok: true })
     }
   }
 
   if (path.startsWith('/api/config/proxy-providers/') && method === 'PUT') {
     const name = decodeURIComponent(path.slice('/api/config/proxy-providers/'.length))
-    const config = await getParsedConfig(env)
-    const providers = config['proxy-providers'] || {}
-    if (!providers[name]) return json({ error: 'Not found' }, 404)
+    const doc = await loadConfigDocument(env)
+    if (doc.getIn(['proxy-providers', name]) === undefined) return json({ error: 'Not found' }, 404)
     const body = await parseBody(request)
     const { name: _n, ...providerData } = body
-    providers[name] = providerData as ProxyProvider
-    config['proxy-providers'] = providers
-    await saveConfig(env, serializeConfig(config))
+    doc.updateMap(['proxy-providers', name], providerData as ProxyProvider)
+    await saveConfigDocument(env, doc)
     return json({ ok: true })
   }
 
   if (path.startsWith('/api/config/proxy-providers/') && method === 'DELETE') {
     const name = decodeURIComponent(path.slice('/api/config/proxy-providers/'.length))
-    const config = await getParsedConfig(env)
-    const providers = config['proxy-providers'] || {}
-    if (!providers[name]) return json({ error: 'Not found' }, 404)
-    delete providers[name]
-    config['proxy-providers'] = providers
-    await saveConfig(env, serializeConfig(config))
+    const doc = await loadConfigDocument(env)
+    if (doc.getIn(['proxy-providers', name]) === undefined) return json({ error: 'Not found' }, 404)
+    doc.deleteIn(['proxy-providers', name])
+    await saveConfigDocument(env, doc)
     return json({ ok: true })
   }
 
@@ -515,25 +542,25 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     const authErr = await requireAuthOrAccessKey(request, env)
     if (authErr) return withCors(authErr, request)
 
-    const config = await getParsedConfig(env)
-    const providers = config['rule-providers'] || {}
-
     if (method === 'GET') {
+      const config = await getParsedConfigFromKv(env)
+      const providers = config['rule-providers'] || {}
       const list = Object.entries(providers).map(([name, provider]) => ({ name, ...provider }))
       return withCors(json(list), request)
     }
+
+    const doc = await loadConfigDocument(env)
 
     if (method === 'POST') {
       const body = (await parseBody(request)) as unknown as RuleProvider & { name?: string }
       const name = String(body.name || '').trim()
       if (!name) return withCors(json({ error: 'Name is required' }, 400), request)
-      if (providers[name]) return withCors(json({ error: 'Rule provider already exists' }, 409), request)
-      const { name: _name, ...providerData } = body
-      config['rule-providers'] = {
-        ...providers,
-        [name]: providerData,
+      if (doc.getIn(['rule-providers', name]) !== undefined) {
+        return withCors(json({ error: 'Rule provider already exists' }, 409), request)
       }
-      await saveConfig(env, serializeConfig(config))
+      const { name: _name, ...providerData } = body
+      doc.updateMap(['rule-providers', name], providerData as Record<string, unknown>)
+      await saveConfigDocument(env, doc)
       return withCors(json({ ok: true }), request)
     }
   }
@@ -543,15 +570,13 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     if (authErr) return withCors(authErr, request)
 
     const name = decodeURIComponent(path.slice('/api/config/rule-providers/'.length))
-    const config = await getParsedConfig(env)
-    const providers = config['rule-providers'] || {}
-    if (!providers[name]) return withCors(json({ error: 'Not found' }, 404), request)
-    const body = (await parseBody(request)) as unknown as RuleProvider
-    config['rule-providers'] = {
-      ...providers,
-      [name]: body,
+    const doc = await loadConfigDocument(env)
+    if (doc.getIn(['rule-providers', name]) === undefined) {
+      return withCors(json({ error: 'Not found' }, 404), request)
     }
-    await saveConfig(env, serializeConfig(config))
+    const body = (await parseBody(request)) as unknown as RuleProvider
+    doc.updateMap(['rule-providers', name], body as unknown as Record<string, unknown>)
+    await saveConfigDocument(env, doc)
     return withCors(json({ ok: true }), request)
   }
 
@@ -560,12 +585,12 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     if (authErr) return withCors(authErr, request)
 
     const name = decodeURIComponent(path.slice('/api/config/rule-providers/'.length))
-    const config = await getParsedConfig(env)
-    const providers = config['rule-providers'] || {}
-    if (!providers[name]) return withCors(json({ error: 'Not found' }, 404), request)
-    delete providers[name]
-    config['rule-providers'] = providers
-    await saveConfig(env, serializeConfig(config))
+    const doc = await loadConfigDocument(env)
+    if (doc.getIn(['rule-providers', name]) === undefined) {
+      return withCors(json({ error: 'Not found' }, 404), request)
+    }
+    doc.deleteIn(['rule-providers', name])
+    await saveConfigDocument(env, doc)
     return withCors(json({ ok: true }), request)
   }
 
@@ -574,21 +599,22 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     const authErr = await requireAuthOrAccessKey(request, env)
     if (authErr) return withCors(authErr, request)
 
-    const config = await getParsedConfig(env)
-    const groups = config['proxy-groups'] || []
-
     if (method === 'GET') {
+      const config = await getParsedConfigFromKv(env)
+      const groups = config['proxy-groups'] || []
       return withCors(json(groups), request)
     }
+
+    const doc = await loadConfigDocument(env)
 
     if (method === 'POST') {
       const body = (await parseBody(request)) as unknown as ProxyGroup
       const name = String(body.name || '').trim()
       if (!name) return withCors(json({ error: 'Name is required' }, 400), request)
-      if (groups.some(g => g.name === name)) return withCors(json({ error: 'Group already exists' }, 409), request)
-      groups.push(body)
-      config['proxy-groups'] = groups
-      await saveConfig(env, serializeConfig(config))
+      const groups = readSeq<ProxyGroup>(doc, 'proxy-groups')
+      if (groups.some(g => g?.name === name)) return withCors(json({ error: 'Group already exists' }, 409), request)
+      doc.insertAt(['proxy-groups'], groups.length, body)
+      await saveConfigDocument(env, doc)
       return withCors(json({ ok: true }), request)
     }
   }
@@ -598,14 +624,13 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     if (authErr) return withCors(authErr, request)
 
     const name = decodeURIComponent(path.slice('/api/config/proxy-groups/'.length))
-    const config = await getParsedConfig(env)
-    const groups = config['proxy-groups'] || []
-    const idx = groups.findIndex(g => g.name === name)
+    const doc = await loadConfigDocument(env)
+    const groups = readSeq<ProxyGroup>(doc, 'proxy-groups')
+    const idx = groups.findIndex(g => g?.name === name)
     if (idx === -1) return withCors(json({ error: 'Not found' }, 404), request)
     const body = (await parseBody(request)) as unknown as ProxyGroup
-    groups[idx] = body
-    config['proxy-groups'] = groups
-    await saveConfig(env, serializeConfig(config))
+    doc.updateMap(['proxy-groups', idx], body as unknown as Record<string, unknown>)
+    await saveConfigDocument(env, doc)
     return withCors(json({ ok: true }), request)
   }
 
@@ -614,13 +639,12 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     if (authErr) return withCors(authErr, request)
 
     const name = decodeURIComponent(path.slice('/api/config/proxy-groups/'.length))
-    const config = await getParsedConfig(env)
-    const groups = config['proxy-groups'] || []
-    const idx = groups.findIndex(g => g.name === name)
+    const doc = await loadConfigDocument(env)
+    const groups = readSeq<ProxyGroup>(doc, 'proxy-groups')
+    const idx = groups.findIndex(g => g?.name === name)
     if (idx === -1) return withCors(json({ error: 'Not found' }, 404), request)
-    groups.splice(idx, 1)
-    config['proxy-groups'] = groups
-    await saveConfig(env, serializeConfig(config))
+    doc.deleteIn(['proxy-groups', idx])
+    await saveConfigDocument(env, doc)
     return withCors(json({ ok: true }), request)
   }
 
@@ -629,21 +653,22 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     const authErr = await requireAuthOrAccessKey(request, env)
     if (authErr) return withCors(authErr, request)
 
-    const config = await getParsedConfig(env)
-    const rules = config.rules || []
-
     if (method === 'GET') {
+      const config = await getParsedConfigFromKv(env)
+      const rules = config.rules || []
       const parsed = rules.map((r, i) => ({ index: i, raw: r, ...parseRule(r) }))
       return withCors(json(parsed), request)
     }
+
+    const doc = await loadConfigDocument(env)
+    const rules = readSeq<string>(doc, 'rules')
 
     if (method === 'POST') {
       const body = await parseBody(request)
       const raw = String(body.raw || '')
       if (!raw) return withCors(json({ error: 'Rule is required' }, 400), request)
-      rules.push(raw)
-      config.rules = rules
-      await saveConfig(env, serializeConfig(config))
+      doc.insertAt(['rules'], rules.length, raw)
+      await saveConfigDocument(env, doc)
       return withCors(json({ ok: true }), request)
     }
 
@@ -651,8 +676,8 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       const body = await parseBody(request)
       const reorder = body.rules as string[]
       if (!Array.isArray(reorder)) return withCors(json({ error: 'rules array required' }, 400), request)
-      config.rules = reorder
-      await saveConfig(env, serializeConfig(config))
+      doc.syncSeq(['rules'], reorder, value => String(value))
+      await saveConfigDocument(env, doc)
       return withCors(json({ ok: true }), request)
     }
   }
@@ -663,15 +688,14 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 
     const idxStr = path.slice('/api/config/rules/'.length)
     const idx = parseInt(idxStr, 10)
-    const config = await getParsedConfig(env)
-    const rules = config.rules || []
+    const doc = await loadConfigDocument(env)
+    const rules = readSeq<string>(doc, 'rules')
     if (idx < 0 || idx >= rules.length) return withCors(json({ error: 'Index out of range' }, 404), request)
     const body = await parseBody(request)
     const raw = String(body.raw || '')
     if (!raw) return withCors(json({ error: 'Rule is required' }, 400), request)
-    rules[idx] = raw
-    config.rules = rules
-    await saveConfig(env, serializeConfig(config))
+    doc.setIn(['rules', idx], raw)
+    await saveConfigDocument(env, doc)
     return withCors(json({ ok: true }), request)
   }
 
@@ -681,12 +705,11 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 
     const idxStr = path.slice('/api/config/rules/'.length)
     const idx = parseInt(idxStr, 10)
-    const config = await getParsedConfig(env)
-    const rules = config.rules || []
+    const doc = await loadConfigDocument(env)
+    const rules = readSeq<string>(doc, 'rules')
     if (idx < 0 || idx >= rules.length) return withCors(json({ error: 'Index out of range' }, 404), request)
-    rules.splice(idx, 1)
-    config.rules = rules
-    await saveConfig(env, serializeConfig(config))
+    doc.deleteIn(['rules', idx])
+    await saveConfigDocument(env, doc)
     return withCors(json({ ok: true }), request)
   }
 

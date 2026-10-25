@@ -1,5 +1,4 @@
 import { getConfig } from './config'
-import { parseConfig, serializeConfig } from './yaml'
 
 const LONG_POLL_HEADER = 'X-Sub-Magic-Long-Poll'
 const LONG_POLL_INTERVAL_MS = 3000
@@ -64,11 +63,9 @@ export async function generateSubscription(env: Env, request: Request): Promise<
     })
   }
 
-  const config = parseConfig(rawConfig)
-
-  const output = serializeConfig(config)
-
-  return new Response(output, {
+  // 订阅输出与存储保持完全一致：注释、锚点（&name / *name）与排版原样下发，
+  // 客户端（mihomo）本身支持这些语法，也便于用户直接对照本地文件排查。
+  return new Response(rawConfig, {
     headers: {
       'Content-Type': 'text/yaml; charset=utf-8',
       'Content-Disposition': 'attachment; filename="config.yaml"',

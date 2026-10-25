@@ -4,6 +4,8 @@ import worker from "../src"
 import { parseConfig, serializeConfig, parseRule, serializeRule } from "../src/yaml"
 import { hashKey } from "../src/auth"
 
+const TEST_PASSWORD = "sub-magic-test-password"
+
 beforeEach(async () => {
   await env.SUB_MAGIC.put("config", `mixed-port: 7890
 proxy-providers:
@@ -24,6 +26,7 @@ proxies:
 `)
   await env.SUB_MAGIC.put("subscription_key", "sm_sub_testkey123")
   await env.SUB_MAGIC.put("api_key_hash", await hashKey("sm_api_testkey456"))
+  await env.SUB_MAGIC.put("password_hash", await hashKey(TEST_PASSWORD))
 })
 
 describe("YAML utilities", () => {
@@ -51,11 +54,11 @@ describe("YAML utilities", () => {
         ipv6: true,
       },
       profile: {
-        store-fake-ip: true,
-        store-selected: true,
+        'store-fake-ip': true,
+        'store-selected': true,
       },
       'proxy-groups': [{ type: 'select', name: 'Proxy', interval: 300, proxies: ['DIRECT'] }],
-      mixed-port: 7890,
+      'mixed-port': 7890,
       'proxy-providers': {
         demo: {
           interval: 86400,
@@ -161,7 +164,7 @@ describe("API endpoints", () => {
     const res = await SELF.fetch("http://example.com/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: env.PASSWORD }),
+      body: JSON.stringify({ password: TEST_PASSWORD }),
     })
     cookie = res.headers.get("Set-Cookie") || ""
   }
@@ -444,4 +447,166 @@ describe("API endpoints", () => {
     expect(res.headers.get("Access-Control-Allow-Headers")).toContain("authorization")
   })
 
+})
+
+describe("Comment & anchor preserving writes", () => {
+  const HAND_WRITTEN = `# ═════════════════════════════
+#  手写配置：注释与锚点必须活下来
+# ═════════════════════════════
+
+mixed-port: 7890
+unified-delay: true            # 行尾注释
+mode: rule
+
+proxy-providers:
+  # 主订阅
+  main:
+    url: "https://example.com/sub"
+    type: http
+    interval: 86400
+
+# ── 策略组 ──────────────────────
+proxy-groups:
+  # 总控
+  - name: 默认
+    type: select
+    proxies: [自动选择, DIRECT]
+
+  # 平台服务（&svc 复用出口清单）
+  - name: Google
+    type: select
+    proxies: &svc [默认, 香港, DIRECT]
+  - name: YouTube
+    type: select
+    proxies: *svc
+
+# ── 规则 ───────────────────────
+rules:
+  # 局域网
+  - GEOIP,lan,DIRECT,no-resolve
+  - GEOSITE,google,Google
+  - MATCH,默认
+`
+
+  let cookie = ""
+
+  async function putConfig(config: string) {
+    const res = await SELF.fetch("http://example.com/api/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ config }),
+    })
+    expect(res.status).toBe(200)
+    return res
+  }
+
+  async function getConfigText(): Promise<string> {
+    const res = await SELF.fetch("http://example.com/api/config", { headers: { Cookie: cookie } })
+    expect(res.status).toBe(200)
+    const data = await res.json() as { config: string }
+    return data.config
+  }
+
+  beforeEach(async () => {
+    const res = await SELF.fetch("http://example.com/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: TEST_PASSWORD }),
+    })
+    cookie = res.headers.get("Set-Cookie") || ""
+    await putConfig(HAND_WRITTEN)
+  })
+
+  it("stores the edited text verbatim", async () => {
+    // 文本编辑保存后连行尾注释对齐都不变
+    expect(await getConfigText()).toBe(HAND_WRITTEN)
+  })
+
+  it("serves the subscription with comments and anchors intact", async () => {
+    const res = await SELF.fetch("http://example.com/sub/sm_sub_testkey123")
+    expect(res.status).toBe(200)
+    const text = await res.text()
+    expect(text).toBe(HAND_WRITTEN)
+    expect(text).toContain("&svc")
+    expect(text).toContain("*svc")
+  })
+
+  it("appending a rule keeps comments and anchors", async () => {
+    const res = await SELF.fetch("http://example.com/api/config/rules", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ raw: "DOMAIN-SUFFIX,shopee.sg,默认" }),
+    })
+    expect(res.status).toBe(200)
+
+    const text = await getConfigText()
+    expect(text).toContain("# 平台服务（&svc 复用出口清单）")
+    expect(text).toContain("proxies: &svc [默认, 香港, DIRECT]")
+    expect(text).toContain("proxies: *svc")
+    expect(text).toContain("- DOMAIN-SUFFIX,shopee.sg,默认")
+    // 只新增一行，其余内容逐字节不变
+    expect(text.replace("  - DOMAIN-SUFFIX,shopee.sg,默认\n", "")).toBe(HAND_WRITTEN)
+  })
+
+  it("POST /api/rules/add before MATCH keeps hand-written formatting", async () => {
+    const res = await SELF.fetch("http://example.com/api/rules/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer sm_api_testkey456" },
+      body: JSON.stringify({ rule: "GEOSITE,shopee,默认" }),
+    })
+    expect(res.status).toBe(200)
+
+    const text = await getConfigText()
+    expect(text).toContain("  # 局域网\n  - GEOIP,lan,DIRECT,no-resolve\n  - GEOSITE,google,Google\n  - GEOSITE,shopee,默认\n  - MATCH,默认")
+    expect(text).toContain("&svc")
+  })
+
+  it("editing the anchor owner group updates every alias", async () => {
+    const res = await SELF.fetch("http://example.com/api/config/proxy-groups/Google", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ name: "Google", type: "select", proxies: ["默认", "香港", "日本", "DIRECT"] }),
+    })
+    expect(res.status).toBe(200)
+
+    const text = await getConfigText()
+    expect(text).toContain("proxies: &svc [默认, 香港, 日本, DIRECT]")
+    expect(text).toContain("  - name: YouTube\n    type: select\n    proxies: *svc")
+    expect(text).toContain("# 平台服务（&svc 复用出口清单）")
+
+    const groups = await (await SELF.fetch("http://example.com/api/config/proxy-groups", { headers: { Cookie: cookie } })).json() as Array<{ name: string, proxies: string[] }>
+    expect(groups[1].proxies).toEqual(["默认", "香港", "日本", "DIRECT"])
+    expect(groups[2].proxies).toEqual(["默认", "香港", "日本", "DIRECT"])
+  })
+
+  it("deleting the anchor owner keeps the config valid", async () => {
+    const res = await SELF.fetch("http://example.com/api/config/proxy-groups/Google", {
+      method: "DELETE",
+      headers: { Cookie: cookie },
+    })
+    expect(res.status).toBe(200)
+
+    const text = await getConfigText()
+    expect(text).not.toContain("&svc")
+    expect(text).not.toContain("*svc")
+    expect(text).toContain("  - name: YouTube\n    type: select\n    proxies: [默认, 香港, DIRECT]")
+
+    const groups = await (await SELF.fetch("http://example.com/api/config/proxy-groups", { headers: { Cookie: cookie } })).json() as Array<{ name: string, proxies: string[] }>
+    expect(groups.map(group => group.name)).toEqual(["默认", "YouTube"])
+    expect(groups[1].proxies).toEqual(["默认", "香港", "DIRECT"])
+  })
+
+  it("updating a provider keeps neighbouring comments", async () => {
+    const res = await SELF.fetch("http://example.com/api/config/proxy-providers/main", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ url: "https://example.com/sub2", type: "http", interval: 3600 }),
+    })
+    expect(res.status).toBe(200)
+
+    const text = await getConfigText()
+    // 原有引号风格也保留下来，只改变化的值
+    expect(text).toContain('# 主订阅\n  main:\n    url: "https://example.com/sub2"\n    type: http\n    interval: 3600')
+    expect(text).toContain("# ── 策略组 ──────────────────────")
+  })
 })

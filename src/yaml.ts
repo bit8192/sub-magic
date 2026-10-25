@@ -116,13 +116,14 @@ export interface ClashConfig {
 }
 
 export function parseConfig(yamlText: string): ClashConfig {
-  const doc = YAML.parse(yamlText)
+  // merge: true → 展开 `<<: *anchor` 继承的字段，与 mihomo 的解析结果保持一致
+  const doc = YAML.parse(yamlText, { merge: true })
   if (!doc || typeof doc !== 'object') return {}
   return doc as ClashConfig
 }
 
 export function serializeConfig(config: ClashConfig): string {
-  return YAML.stringify(orderConfigForSerialize(config), {
+  return YAML.stringify(orderConfigValue(config), {
     lineWidth: 0,
     indent: 2,
     aliasDuplicateObjects: false,
@@ -304,10 +305,21 @@ function getOrderForPath(path: string[]): readonly string[] | undefined {
   const direct = KEY_ORDERS_BY_PATH[path.join('.')]
   if (direct) return direct
 
-  const wildcardPath = path.map((segment, index) => {
-    return /^\d+$/.test(segment) ? '*' : segment
-  }).join('.')
-  return KEY_ORDERS_BY_PATH[wildcardPath]
+  // 序列下标统一当通配符处理：proxy-groups.3 → proxy-groups.*
+  const segments = path.map(segment => (/^\d+$/.test(segment) ? '*' : segment))
+  const numericPath = KEY_ORDERS_BY_PATH[segments.join('.')]
+  if (numericPath) return numericPath
+
+  // 「name → 配置对象」这类映射（proxy-providers.<name>、listeners.<name>）
+  // 逐级把末尾的键换成通配符再匹配一次
+  for (let i = segments.length - 1; i >= 0; i--) {
+    if (segments[i] === '*') continue
+    const candidate = segments.slice(0, i).concat('*', segments.slice(i + 1)).join('.')
+    const order = KEY_ORDERS_BY_PATH[candidate]
+    if (order) return order
+  }
+
+  return undefined
 }
 
 function sortKeys(keys: string[], order: readonly string[] | undefined): string[] {
@@ -323,9 +335,13 @@ function sortKeys(keys: string[], order: readonly string[] | undefined): string[
   })
 }
 
-function orderConfigForSerialize<T>(value: T, path: string[] = []): T {
+/**
+ * 按 Mihomo 配置的惯例顺序重排对象的键（只重排键，不改值）。
+ * 用于新建节点：解析已有文档时不会走到这里，所以手写配置的键顺序不受影响。
+ */
+export function orderConfigValue<T>(value: T, path: string[] = []): T {
   if (Array.isArray(value)) {
-    return value.map((item, index) => orderConfigForSerialize(item, [...path, String(index)])) as T
+    return value.map((item, index) => orderConfigValue(item, [...path, String(index)])) as T
   }
 
   if (!value || typeof value !== 'object') {
@@ -336,7 +352,7 @@ function orderConfigForSerialize<T>(value: T, path: string[] = []): T {
   const ordered: Record<string, unknown> = {}
   const keys = sortKeys(Object.keys(source), getOrderForPath(path))
   for (const key of keys) {
-    ordered[key] = orderConfigForSerialize(source[key], [...path, key])
+    ordered[key] = orderConfigValue(source[key], [...path, key])
   }
   return ordered as T
 }
