@@ -21,12 +21,10 @@
 	 * 生产环境无需在此配置。部署后登录 Cloudflare Dashboard →
 	 * Worker → Settings → Variables → KV Namespace Bindings
 	 * 添加变量名 SUB_MAGIC 并选择对应的 KV 命名空间即可。
-	 *
-	 * 如需本地开发调试，可参考下方取消注释（wrangler dev 会自动创建本地 KV）：
 	 */
-//	 "kv_namespaces": [
-//	   { "binding": "SUB_MAGIC", "id": "local-dev-kv-0000000000000000" }
-//	 ],
+	 "kv_namespaces": [
+	   { "binding": "SUB_MAGIC", "id": "0f4f30952b8c43be80b047db3f07a546" }
+	 ],
 	"durable_objects": {
 		"bindings": [
 			{
